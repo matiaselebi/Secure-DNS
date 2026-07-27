@@ -1,0 +1,44 @@
+dns:
+  host: "127.0.0.1"
+  port: 53
+  # Timeout (segundos) esperando respuesta de cada servidor upstream.
+  upstream_timeout: 2.0
+  upstream_primary: "9.9.9.9"    # Quad9: filtra malware conocido por su cuenta + no loguea
+  upstream_fallback: "1.1.1.1"   # Cloudflare: rápido y confiable, respaldo si Quad9 no responde
+  # Cómo se habla con los upstreams:
+  #   "dot" = DNS-over-TLS: las consultas viajan cifradas (puerto 853). Tu ISP
+  #           ya no puede leer qué dominios consultás. Recomendado.
+  #   "udp" = texto plano clásico (puerto 53).
+  upstream_mode: "dot"
+  # Nombre esperado en el certificado TLS de cada upstream (solo modo dot).
+  # Si el certificado no coincide, la conexión se rechaza (anti-suplantación).
+  upstream_primary_tls_name: "dns.quad9.net"
+  upstream_fallback_tls_name: "cloudflare-dns.com"
+  # Si NINGÚN upstream respondió por TLS (ej: red que bloquea el puerto 853),
+  # ¿se permite caer a UDP en texto plano? true = priorizar que internet siga
+  # funcionando; false = priorizar privacidad estricta (sin TLS no se resuelve).
+  dot_fallback_to_udp: true
+  # Cuánto tiempo (segundos) se cachea una respuesta más allá de su propio TTL, como mínimo.
+  min_cache_ttl: 30
+
+filtering:
+  blocklist_path: "data/blocklist.txt"
+  # Generada automáticamente con: python scripts/update_blocklist.py
+  feeds_blocklist_path: "data/blocklist_feeds.txt"
+  # Lista blanca manual: gana por sobre la blocklist. Se puede editar a mano
+  # o agregar dominios con el botón "Permitir" del dashboard.
+  allowlist_path: "data/allowlist.txt"
+  feeds_update_interval_hours: 6
+  # Categoría aparte de la de amenazas: bloquear dominios de publicidad y
+  # tracking (feed StevenBlack/hosts). Desactivada por defecto porque
+  # bloquear ads no es lo mismo que bloquear amenazas (algún sitio puede
+  # depender visualmente de un tracker) - opt-in explícito.
+  enable_ad_tracker_blocklist: false
+  ad_tracker_blocklist_path: "data/blocklist_adtracker.txt"
+
+logging:
+  db_path: "data/dns_logs.db"
+
+dashboard:
+  host: "127.0.0.1"
+  port: 8890

@@ -1,0 +1,8 @@
+# Lista negra de dominios, uno por línea. Soporta subdominios: si bloqueás
+# "malicious-example.com", también se bloquea "sub.malicious-example.com".
+# Las líneas que empiezan con # son comentarios.
+
+malicious-example.com
+
+# Se combina automáticamente con data/blocklist_feeds.txt, generada por
+# scripts/update_blocklist.py (URLhaus + OpenPhish).
