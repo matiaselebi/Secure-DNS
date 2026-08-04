@@ -9,17 +9,107 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+    # Sin techo, un test que se cuelga deja el job corriendo horas. Los 109
+    # tardan menos de un minuto, así que diez es holgado y a la vez avisa
+    # rápido si algo se traba.
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Las dos versiones que importan: la de Debian estable y la actual.
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
+          cache: pip
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Run tests
-        run: pytest tests/ -v
+        run: pytest tests/ -q
+
+      # Que pasen los tests no garantiza que el resolver ARRANQUE. Un import
+      # mal puesto o un error leyendo la configuración no siempre lo agarra un
+      # test unitario, y es justo lo que rompe la instalación de alguien que
+      # clona el repo.
+      - name: Comprobar que arranca, responde y apaga limpio
+        run: |
+          # Control de trabajos prendido. Bash, cuando no es interactivo, le
+          # deja el SIGINT en SIG_IGN a todo lo que se lanza con "&": un
+          # `kill -INT` sobre el proceso no haría nada y el `wait` de después
+          # se colgaría para siempre. Acá el apagado se hace por HTTP y no por
+          # señal, pero se prende igual para que esta prueba se comporte como
+          # una terminal de verdad y no haya sorpresas si algún día se agrega.
+          set -m
+
+          python - <<'EOF'
+          import pathlib
+          p = pathlib.Path('config/config.yaml')
+          t = p.read_text(encoding='utf-8')
+          # El puerto 53 necesita root; el del panel se mueve para no chocar.
+          p.write_text(t.replace('port: 53', 'port: 15353')
+                        .replace('port: 8890', 'port: 18890'),
+                       encoding='utf-8')
+          EOF
+
+          # Lo que imprime el resolver va a un archivo: si algo falla, "el
+          # panel nunca respondió" no dice nada y el log sí. Un CI que falla
+          # sin mostrar el motivo obliga a adivinar.
+          python -u scripts/run_dns.py > /tmp/dns.log 2>&1 &
+          DNS_PID=$!
+          arranco=0
+          for _ in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18890/health > /dev/null; then arranco=1; break; fi
+            # Si el proceso ya murió no tiene sentido seguir esperando.
+            kill -0 $DNS_PID 2>/dev/null || break
+            sleep 1
+          done
+          if [ "$arranco" != "1" ]; then
+            echo "::error::el resolver no respondió en /health. Esto imprimió:"
+            cat /tmp/dns.log
+            exit 1
+          fi
+          curl -sf -o /dev/null -w "panel: HTTP %{http_code}\n" http://127.0.0.1:18890/
+
+          # Una página cualquiera no tiene que poder tocar el resolver.
+          codigo=$(curl -s -o /dev/null -w "%{http_code}" \
+                   -H "Sec-Fetch-Site: cross-site" \
+                   "http://127.0.0.1:18890/config?k=upstream_mode&v=udp")
+          [ "$codigo" = "403" ] || { echo "::error::CSRF: esperaba 403 y vino $codigo"; exit 1; }
+          echo "acciones protegidas contra CSRF"
+
+          # Y el apagado desde el panel tiene que cerrar el proceso de verdad.
+          curl -sf http://127.0.0.1:18890/apagar | grep -q "SecureDNS apagado" \
+            || { echo "::error::/apagar no devolvió la página de despedida"; cat /tmp/dns.log; exit 1; }
+          # El código de salida se lee con `wait` DIRECTO, y el techo se pone
+          # con un guardián en segundo plano.
+          #
+          # Antes esto esperaba con un bucle de `kill -0` y recién después
+          # hacía `wait`, y ahí el chequeo no chequeaba nada: con `set -m`
+          # activo, bash notifica y saca el job de su tabla apenas termina, así
+          # que el `wait` posterior devuelve 127 en vez del código real. Como
+          # estaba escrito como `wait ... && echo`, ese 127 no rompía el paso:
+          # simplemente no se imprimía la confirmación y el CI pasaba en verde
+          # sin haber verificado el apagado. Un chequeo que no chequea es peor
+          # que no tenerlo, porque da confianza.
+          ( sleep 30; kill -9 $DNS_PID 2>/dev/null ) &
+          GUARDIA=$!
+          if wait $DNS_PID; then
+            echo "el botón de apagar cerró con código 0"
+          else
+            echo "::error::el resolver no cerró limpio (código $?)"
+            cat /tmp/dns.log
+            exit 1
+          fi
+          kill $GUARDIA 2>/dev/null || true
+          test ! -f data/dns.pid || { echo "quedó el PID file huérfano"; exit 1; }
+
+          git checkout config/config.yaml

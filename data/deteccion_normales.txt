@@ -1,0 +1,22 @@
+# Hallazgos de la pestaña Detección marcados como normales.
+#
+# Un dominio por línea, sin http:// y sin barra final. Aplica también a sus
+# subdominios: "googlevideo.com" cubre "rr3---sn-4g5e6nz7.googlevideo.com".
+#
+# Qué hace estar acá: el patrón de ese dominio deja de aparecer como hallazgo
+# en Detección y deja de restar puntos del puntaje de seguridad.
+#
+# Qué NO hace: no es una lista blanca. Estos dominios se siguen filtrando
+# exactamente igual que cualquier otro (si mañana entran a un feed de
+# amenazas, se bloquean), se siguen registrando y se ven enteros en el
+# historial. Lo único que se silencia es el aviso.
+#
+# Se edita solo desde el panel (botón "Es normal, no marcarlo más" en cada
+# hallazgo, y "Volver a vigilar" para revertir), pero se puede tocar a mano.
+#
+# El caso típico es un CDN de video: googlevideo.com genera un nombre
+# distinto por servidor y por sesión, largo y sin forma de palabra, que es
+# exactamente la forma que tiene un túnel de DNS. El detector no se equivoca
+# al marcarlo; lo que falta es que alguien mire una vez y diga "es YouTube".
+# Viene vacío a propósito: qué es normal depende de cada red, y una lista
+# armada de fábrica silenciaría cosas que nadie revisó.

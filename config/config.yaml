@@ -35,10 +35,67 @@ filtering:
   # depender visualmente de un tracker) - opt-in explícito.
   enable_ad_tracker_blocklist: false
   ad_tracker_blocklist_path: "data/blocklist_adtracker.txt"
+  # Con qué se le contesta a un dominio bloqueado:
+  #   "nxdomain"  = "ese nombre no existe". Lo más limpio, pero algunas
+  #                 aplicaciones lo leen como "no hay red" y reintentan.
+  #   "zero"      = 0.0.0.0 (y :: en IPv6). El nombre existe pero no va a
+  #                 ningún lado: la conexión falla al instante y suele romper
+  #                 menos cosas. Es lo que usa Pi-hole por defecto.
+  #   "localhost" = 127.0.0.1 (y ::1). Igual, pero el intento se queda en tu
+  #                 propia máquina, por si tenés algo escuchando ahí.
+  # Para tipos que no son A ni AAAA (TXT, MX...) siempre se responde NXDOMAIN:
+  # fabricar una respuesta inventada sería peor que decir que no existe.
+  block_mode: "nxdomain"
 
 logging:
   db_path: "data/dns_logs.db"
+  # Tope de filas del historial. Se recorta solo: se conservan las más
+  # recientes. Un resolver que atiende a toda la casa registra muchísimo
+  # (cada página web dispara decenas de consultas), así que sin tope el
+  # archivo crece para siempre y el panel deja de abrir. 0 = sin límite.
+  max_rows: 200000
 
 dashboard:
   host: "127.0.0.1"
   port: 8890
+  # Filtro de VISTA: saca del panel la telemetría y las comprobaciones de
+  # conexión, que son tan repetitivas que tapan todo lo demás. NO cambia nada
+  # de lo que se bloquea, no borra ningún dato, el panel siempre dice cuántas
+  # consultas ocultó y el buscador las encuentra igual. Se prende y se apaga
+  # desde la pestaña Configuración.
+  hide_noise: true
+  noisy_domains_path: "data/noisy_domains.txt"
+  # Hallazgos de la pestaña Detección que ya revisaste y sabés que son
+  # normales en tu red. El caso típico es un CDN de video: googlevideo.com
+  # genera un nombre distinto por servidor, largo y sin forma de palabra, que
+  # es exactamente la forma que tiene un túnel. Marcarlo desde el panel deja
+  # de mostrarlo como hallazgo y deja de restar puntaje. NO es una lista
+  # blanca: no cambia ninguna decisión de bloqueo y las consultas se siguen
+  # viendo enteras en el historial.
+  normal_findings_path: "data/deteccion_normales.txt"
+
+# Datos que se le piden a terceros o que se sacan de una base descargada.
+intel:
+  # Consultar por RDAP hace cuánto se registró un dominio. Muchísimo malware
+  # usa dominios de días, así que la señal es buena, PERO cada consulta le
+  # cuenta a un tercero qué dominio estás mirando, que es justo lo que
+  # DNS-over-TLS evita. Por eso viene apagado, y cuando se prende se consulta
+  # solo para los pocos dominios que ya llamaron la atención por otra razón
+  # (los hallazgos de la pestaña Detección), con cache de 30 días.
+  rdap_enabled: false
+  rdap_cache_path: "data/rdap_cache.db"
+  # Avisos cuando algo cruza un umbral. NO avisa por cada bloqueo: un resolver
+  # que atiende a toda la casa bloquea miles por día y eso sería una
+  # notificación cada pocos segundos, o sea una herramienta que terminás
+  # apagando. Avisa por picos, por malware/phishing (que son pocos y cada uno
+  # importa) y por hallazgos nuevos de la pestaña Detección.
+  alerts_enabled: true
+  # Avisos por Telegram, además de la notificación de escritorio. El token y
+  # el chat NO van acá: van en el archivo .env, que está fuera de git. Un
+  # token en el config es un token en el repositorio.
+  telegram_enabled: false
+  # País, ASN y proveedor de la IP a la que resuelve cada nombre. Es una base
+  # local: se descarga una vez con `python scripts/update_geoip.py` y después
+  # se consulta en disco, sin salir a la red. Si el archivo no está, el panel
+  # simplemente no muestra esos datos.
+  geoip_db_path: "data/geoip.db"

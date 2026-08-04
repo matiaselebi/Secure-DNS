@@ -113,10 +113,14 @@ echo.
 echo Quitando el inicio automatico...
 schtasks /delete /tn "%TASK_NAME%" /f >nul 2>&1
 
-echo Volviendo el DNS de tus adaptadores a automatico (DHCP)...
-powershell -NoProfile -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { Set-DnsClientServerAddress -InterfaceIndex $_.InterfaceIndex -ResetServerAddresses }" >nul 2>&1
-
-echo Deteniendo el proceso (si estaba corriendo)...
+echo Deteniendo el proceso y volviendo el DNS a automatico (DHCP)...
+rem Las dos cosas las hace stop_dns.py, en un solo lugar. Antes el reset del
+rem DNS estaba aca en el .bat y el matar el proceso en el script, asi que
+rem apagar desde SecureCenter, con Ctrl+C o desde el panel dejaba a los
+rem adaptadores apuntando a un 127.0.0.1 donde ya no escuchaba nadie: la PC
+rem no resolvia ningun nombre y parecia que se caia el wifi. Ademas el script
+rem toca SOLO los adaptadores que apuntan a SecureDNS, en vez de resetear
+rem todos los activos y llevarse puesto un DNS que hayas puesto vos.
 "%PYTHON%" scripts\stop_dns.py
 
 echo.
@@ -143,7 +147,7 @@ if exist "data\dns.pid" (
 echo DNS actual de tus adaptadores:
 powershell -NoProfile -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { Write-Host ('  ' + $_.Name + ': ' + ((Get-DnsClientServerAddress -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4).ServerAddresses -join ', ')) }"
 
-powershell -NoProfile -Command "try { $n = (Invoke-WebRequest -Uri '%DASHBOARD_URL%cache-count' -UseBasicParsing -TimeoutSec 3).Content; Write-Host ('Entradas en cache de respuestas : ' + $n) } catch { Write-Host 'Entradas en cache de respuestas : no disponible (el resolver no esta corriendo)' }"
+powershell -NoProfile -Command "[System.Net.WebRequest]::DefaultWebProxy = $null; try { $n = (Invoke-WebRequest -Uri '%DASHBOARD_URL%cache-count' -UseBasicParsing -TimeoutSec 3).Content; Write-Host ('Entradas en cache de respuestas : ' + $n) } catch { Write-Host 'Entradas en cache de respuestas : no disponible (el resolver no esta corriendo)' }"
 echo.
 pause
 goto menu
@@ -199,7 +203,7 @@ if /i not "%CONFIRMA%"=="s" (
     goto menu
 )
 echo.
-powershell -NoProfile -Command "try { Invoke-WebRequest -Uri '%DASHBOARD_URL%clear-cache' -UseBasicParsing -TimeoutSec 3 | Out-Null; Write-Host '  OK: cache borrado.' } catch { Write-Host '  El resolver no parece estar corriendo, no hay nada que borrar.'; exit 1 }"
+powershell -NoProfile -Command "[System.Net.WebRequest]::DefaultWebProxy = $null; try { Invoke-WebRequest -Uri '%DASHBOARD_URL%clear-cache' -UseBasicParsing -TimeoutSec 3 | Out-Null; Write-Host '  OK: cache borrado.' } catch { Write-Host '  El resolver no parece estar corriendo, no hay nada que borrar.'; exit 1 }"
 pause
 goto menu
 

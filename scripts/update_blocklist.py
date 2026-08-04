@@ -9,7 +9,9 @@ arrancar, respetando un intervalo mínimo (filtering.feeds_update_interval_hours
 en config/config.yaml) para no descargar de más.
 """
 
+import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -92,6 +94,57 @@ def fetch_openphish_domains() -> set[str]:
     return domains
 
 
+def escribir_atomico(destino: Path, contenido: str) -> None:
+    """Escribe el archivo entero de una, o no lo escribe.
+
+    Por qué importa acá: el resolver relee estas listas cada 15 segundos desde
+    otro hilo. Abriendo el destino en modo "w" el archivo queda truncado
+    mientras se escribe, así que una recarga que caiga justo en ese momento
+    carga una lista A MEDIAS y filtra con ella hasta la recarga siguiente.
+    Medido con el feed de publicidad: el resolver quedó con 109.163 de 150.000
+    dominios cargados, o sea 15 segundos filtrando con dos tercios de la lista.
+
+    Y si el proceso muere a mitad de la escritura, el archivo queda truncado
+    para siempre: como `is_stale` mira la fecha de modificación, no se vuelve a
+    descargar hasta seis horas después.
+
+    Se escribe a un temporal en la MISMA carpeta (os.replace solo es atómico
+    dentro del mismo sistema de archivos) y se renombra encima.
+    """
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporal = tempfile.mkstemp(dir=str(destino.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(contenido)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporal, destino)
+    except BaseException:
+        try:
+            os.unlink(temporal)
+        except OSError:
+            pass
+        raise
+
+
+def _bloque(categoria: str, dominios: set[str]) -> str:
+    """Una sección con su marca de categoría adelante."""
+    if not dominios:
+        return ""
+    return f"\n# categoria: {categoria}\n" + "".join(
+        d + "\n" for d in sorted(dominios)
+    )
+
+
+def _escribir_bloque(f, categoria: str, dominios: set[str]) -> None:
+    """Escribe una sección con su marca de categoría adelante."""
+    if not dominios:
+        return
+    f.write(f"\n# categoria: {categoria}\n")
+    for domain in sorted(dominios):
+        f.write(domain + "\n")
+
+
 def is_stale(path: Path, min_interval_hours: float) -> bool:
     if not path.exists():
         return True
@@ -112,7 +165,14 @@ def main(
         updated_security = False
     else:
         print("[update_blocklist] Descargando feeds de amenazas (URLhaus + OpenPhish)...")
-        domains = fetch_urlhaus_domains() | fetch_openphish_domains()
+        malware = fetch_urlhaus_domains()
+        phishing = fetch_openphish_domains()
+        # Un dominio puede estar en los dos feeds. Se queda en malware, que es
+        # la categoría más grave: decir "phishing" de algo que URLhaus marcó
+        # como malware sería quedarse corto. Y se saca de la otra lista para
+        # que no aparezca dos veces.
+        phishing -= malware
+        domains = malware | phishing
 
         if not domains:
             print(
@@ -121,14 +181,21 @@ def main(
             )
             updated_security = False
         else:
-            OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
-                f.write("# Generado automáticamente por scripts/update_blocklist.py\n")
-                f.write("# Fuentes: URLhaus (abuse.ch) + OpenPhish. NO editar a mano.\n")
-                f.write(f"# Total de dominios: {len(domains)}\n\n")
-                for domain in sorted(domains):
-                    f.write(domain + "\n")
-            print(f"[update_blocklist] Listo: {len(domains)} dominios guardados en {OUTPUT_PATH}")
+            escribir_atomico(OUTPUT_PATH,
+                "# Generado automáticamente por scripts/update_blocklist.py\n"
+                "# Fuentes: URLhaus (abuse.ch) + OpenPhish. NO editar a mano.\n"
+                f"# Total de dominios: {len(domains)}\n"
+                "#\n"
+                "# Las lineas '# categoria: X' no son un comentario cualquiera:\n"
+                "# el resolver las lee para saber de que es cada dominio, y asi\n"
+                "# el panel puede decir 'malware' o 'phishing' en vez de un\n"
+                "# generico 'bloqueado'. Ver src/securedns/blocklist.py.\n"
+                + _bloque("malware", malware)
+                + _bloque("phishing", phishing))
+            print(
+                f"[update_blocklist] Listo: {len(malware)} de malware y "
+                f"{len(phishing)} de phishing guardados en {OUTPUT_PATH}"
+            )
             updated_security = True
 
     updated_ad_tracker = False
@@ -142,13 +209,11 @@ def main(
             print("[update_blocklist] Descargando feed de ads/trackers (StevenBlack/hosts)...")
             ad_tracker_domains = fetch_ad_tracker_domains()
             if ad_tracker_domains:
-                AD_TRACKER_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-                with open(AD_TRACKER_OUTPUT_PATH, "w", encoding="utf-8") as f:
-                    f.write("# Generado automáticamente por scripts/update_blocklist.py\n")
-                    f.write("# Fuente: StevenBlack/hosts. NO editar a mano.\n")
-                    f.write(f"# Total de dominios: {len(ad_tracker_domains)}\n\n")
-                    for domain in sorted(ad_tracker_domains):
-                        f.write(domain + "\n")
+                escribir_atomico(AD_TRACKER_OUTPUT_PATH,
+                    "# Generado automáticamente por scripts/update_blocklist.py\n"
+                    "# Fuente: StevenBlack/hosts. NO editar a mano.\n"
+                    f"# Total de dominios: {len(ad_tracker_domains)}\n"
+                    + _bloque("publicidad", ad_tracker_domains))
                 print(
                     f"[update_blocklist] Listo: {len(ad_tracker_domains)} dominios de "
                     f"ads/trackers guardados en {AD_TRACKER_OUTPUT_PATH}"

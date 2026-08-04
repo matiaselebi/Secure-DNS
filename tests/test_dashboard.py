@@ -71,7 +71,9 @@ def test_allow_endpoint_adds_domain_and_redirects(tmp_path):
     server.shutdown()
 
     assert response.status_code == 303
-    assert response.headers["Location"] == "/"
+    # La redirección vuelve al panel con un aviso de qué quedó guardado: el
+    # panel lo dice siempre, aunque no haya habido nada que limpiar.
+    assert response.headers["Location"].startswith("/?aviso=")
     assert allowlist.is_allowed("trusted-example.com") is True
     assert "trusted-example.com" in allowlist_path.read_text()
 
@@ -167,9 +169,14 @@ def test_cache_count_endpoint_returns_plain_number(tmp_path):
     assert response.text.strip() == "2"
 
 
-def test_blockdomain_endpoint_rejects_malformed_input(tmp_path):
-    """Un valor pegado por error (URL completa, con espacios, etc.) no debe
-    terminar escrito en el archivo de blocklist."""
+def test_blockdomain_limpia_una_url_pegada(tmp_path):
+    """Pegar la URL entera del navegador tiene que funcionar.
+
+    Antes esto se rechazaba en silencio: el formulario validaba, no pasaba, y
+    no se guardaba nada sin decir por qué. Nadie copia dominios sueltos: uno
+    copia la barra de direcciones. Ahora se limpia el esquema y el camino, se
+    guarda el dominio, y el aviso dice qué se le sacó.
+    """
     from urllib.parse import quote
 
     logger_db = LoggerDB(str(tmp_path / "logs.db"))
@@ -189,5 +196,32 @@ def test_blockdomain_endpoint_rejects_malformed_input(tmp_path):
 
     server.shutdown()
     assert response.status_code == 303
-    assert blocklist.is_blocked("not-a-domain.com") is False
-    assert "not-a-domain.com" not in blocklist.manual_entries()
+    assert blocklist.is_blocked("not-a-domain.com") is True
+    assert "not-a-domain.com" in blocklist.manual_entries()
+    # Y lo que se guardó es el dominio limpio, no la URL.
+    assert "http" not in "".join(blocklist.manual_entries())
+    assert "/x" not in "".join(blocklist.manual_entries())
+
+
+def test_blockdomain_sigue_rechazando_basura(tmp_path):
+    """Limpiar una URL no es aceptar cualquier cosa: si después de limpiar no
+    queda algo con forma de dominio, no se escribe nada."""
+    from urllib.parse import quote
+
+    logger_db = LoggerDB(str(tmp_path / "logs.db"))
+    allowlist, blocklist, resolver = _make_dashboard_deps(tmp_path, logger_db)
+
+    server = build_dashboard_server("127.0.0.1", 0, logger_db, allowlist, blocklist, resolver)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    time.sleep(0.2)
+    port = server.server_address[1]
+
+    response = requests.get(
+        f"http://127.0.0.1:{port}/blockdomain?domain=" + quote("esto no es un dominio"),
+        timeout=5,
+        allow_redirects=False,
+    )
+
+    server.shutdown()
+    assert response.status_code == 303
+    assert blocklist.manual_entries() == []

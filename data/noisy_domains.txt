@@ -1,0 +1,85 @@
+# Dominios RUIDOSOS: telemetría, comprobación de conexión y actualizaciones.
+#
+# OJO CON QUÉ ES ESTO. Esta lista NO bloquea ni permite nada. No participa
+# de ninguna decisión del resolver. Lo único que hace es sacar estos dominios
+# de la VISTA del panel (historial y estadísticas), porque son tan
+# repetitivos que tapan todo lo demás: si el navegador consulta 600 veces
+# por día si hay internet, ese dominio se come el Top 10 y ya no ves si
+# apareció algo raro.
+#
+# Todo lo que se saca de la vista SIGUE registrado en la base y sigue
+# contado. El panel te dice cuántas conexiones está ocultando, el buscador
+# las encuentra igual (buscar un dominio ignora este filtro a propósito), y
+# el botón de Configuración lo apaga en un clic.
+#
+# Se puede desactivar entero desde la pestaña Configuración del panel.
+#
+# Reglas: un dominio por línea, en minúsculas. Cubre subdominios: poner
+# "windowsupdate.com" también saca "download.windowsupdate.com". Las líneas
+# que empiezan con # son comentarios.
+#
+# Si agregás algo acá, que sea porque es ruido de fondo previsible. Un
+# dominio sospechoso que aparece muchas veces NO va acá: eso es justamente
+# lo que querés ver.
+
+# --- comprobación de conexión a internet (los "¿hay internet?") ---
+msftconnecttest.com
+msftncsi.com
+connectivity-check.ubuntu.com
+detectportal.firefox.com
+captive.apple.com
+gsp1.apple.com
+connectivitycheck.gstatic.com
+connectivitycheck.android.com
+network-test.debian.org
+
+# --- telemetría y estadísticas de uso ---
+google-analytics.com
+analytics.google.com
+googletagmanager.com
+doubleclick.net
+telemetry.microsoft.com
+vortex.data.microsoft.com
+watson.telemetry.microsoft.com
+settings-win.data.microsoft.com
+telemetry.visualstudio.com
+settings.visualstudio.com
+incoming.telemetry.mozilla.org
+telemetry.mozilla.org
+app-measurement.com
+crashlytics.com
+sentry.io
+bam.nr-data.net
+
+# --- actualizaciones automáticas de software ---
+windowsupdate.com
+update.microsoft.com
+delivery.mp.microsoft.com
+go.microsoft.com
+go-updater.brave.com
+edgedl.me.gvt1.com
+clients2.google.com
+update.googleapis.com
+autoupdate.mozilla.org
+aus5.mozilla.org
+
+# --- certificados, revocación y sellado de tiempo ---
+# Nada de esto es opcional: sin CRL/OCSP el navegador no puede validar
+# certificados. Aparece constantemente y no dice nada sobre tu seguridad.
+c.pki.goog
+o.pki.goog
+ocsp.digicert.com
+crl.microsoft.com
+ocsp.msocsp.com
+ctldl.windowsupdate.com
+oneocsp.microsoft.com
+r3.o.lencr.org
+ocsp.sectigo.com
+crl3.digicert.com
+crl4.digicert.com
+
+# --- relojes y sincronización horaria ---
+time.windows.com
+time.apple.com
+ntp.ubuntu.com
+pool.ntp.org
