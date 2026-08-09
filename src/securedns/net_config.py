@@ -1,8 +1,52 @@
-"""Dejar el DNS del sistema como estaba cuando el resolver se apaga.
+"""Poner y sacar este resolver como DNS del sistema, sin dejarte sin internet.
 
-POR QUÉ EXISTE ESTE ARCHIVO
+EL BUG QUE ORIGINÓ LA ÚLTIMA VERSIÓN DE ESTE ARCHIVO
 
-Apagar SecureDNS tenía una consecuencia que no era obvia y que dejaba la
+Reportado así: "dejé la suite prendida, reinicié la PC, y cuando quise buscar
+en Google no cargaba".
+
+El DNS de un adaptador de Windows **sobrevive al reinicio**: es una propiedad
+de la placa de red, no del proceso. Entonces la secuencia era:
+
+1. La suite prendida deja los adaptadores apuntando a 127.0.0.1.
+2. Se reinicia la PC. Los adaptadores siguen apuntando a 127.0.0.1.
+3. Windows levanta la red **mucho antes** que la tarea de inicio automático
+   que arranca SecureDNS: el escritorio ya está y el resolver todavía no.
+4. En esa ventana, y hasta que SecureDNS termine de arrancar, **ningún nombre
+   resuelve**. Si por lo que sea el resolver no arranca (le falta el venv, el
+   puerto 53 está tomado, el config quedó mal), no resuelve nunca más.
+
+Ese agujero no se tapa arrancando más rápido: siempre va a haber un momento
+entre que la red está lista y que el resolver escucha. Se tapa dejando un
+**segundo servidor DNS** configurado detrás del nuestro.
+
+POR QUÉ EL RESPALDO NO ROMPE EL FILTRADO
+
+Windows consulta al primero y solo pasa al segundo si el primero **no
+contesta**. Un dominio bloqueado no es "no contestar": SecureDNS responde
+NXDOMAIN, que es una respuesta válida y definitiva, y ahí Windows no pregunta
+a nadie más. O sea que el respaldo entra en juego exactamente en el único caso
+que nos interesa: cuando SecureDNS no está.
+
+La contra, que hay que decirla: mientras SecureDNS está caído, las consultas
+salen sin filtrar por el respaldo. Es una decisión consciente de fallar
+abierto, igual que el circuit breaker de SecureProxy con AbuseIPDB. Internet
+sin filtro es molesto; sin internet es inusable, y lo primero que hace
+cualquiera cuando "no anda nada" es desinstalar la herramienta. Se puede
+apagar con `dns_del_sistema.respaldo: ""`.
+
+EL SEGUNDO BUG: -ResetServerAddresses CON IP FIJA
+
+Restaurar hacía `-ResetServerAddresses`, que quiere decir "pedile el DNS al
+DHCP". En una máquina con **IP fija configurada a mano** no hay DHCP que
+conteste, así que el adaptador se queda con CERO servidores DNS: apagar
+SecureDNS te dejaba sin resolver nombres. Por eso ahora se **guarda** lo que
+había antes de tocar nada y se repone eso mismo, y `-ResetServerAddresses`
+queda solo como último recurso cuando no hay nada guardado.
+
+QUÉ MÁS HACE ESTE MÓDULO
+
+Apagar SecureDNS también tenía una consecuencia que no era obvia y que dejaba la
 máquina sin internet: `SecureDNS.bat` pone `127.0.0.1` como servidor DNS de
 todos los adaptadores activos, pero apagar el resolver desde cualquier lado
 que no fuera la opción 2 de ese mismo `.bat` -desde SecureCenter, desde
@@ -42,6 +86,22 @@ import json
 import platform
 import shutil
 import subprocess
+from pathlib import Path
+
+# Dónde se anota qué DNS tenía cada adaptador antes de que lo tocáramos. Va a
+# un archivo y no a memoria porque el proceso que pone el DNS puede no ser el
+# mismo que lo saca: lo pone el .bat o SecureCenter, y lo saca stop_dns.py,
+# el botón del panel o un Ctrl+C.
+ARCHIVO_PREVIO = Path(__file__).resolve().parent.parent.parent / "data" / "dns_previo.json"
+
+# El DNS de respaldo que queda DETRÁS del nuestro. Ver el docstring: tapa la
+# ventana entre que Windows levanta la red y que SecureDNS empieza a escuchar,
+# que es de varios segundos en cada reinicio.
+#
+# Quad9 y no un DNS cualquiera: es el mismo al que SecureDNS reenvía por
+# DNS-over-TLS, así que durante esa ventana las consultas van al mismo lugar
+# al que hubieran ido igual (aunque sin cifrar y sin nuestro filtro).
+RESPALDO_POR_DEFECTO = "9.9.9.9"
 
 # Las direcciones que significan "el resolver de esta misma máquina". Si un
 # adaptador apunta a una de estas, lo pusimos nosotros.
@@ -122,6 +182,94 @@ def adaptadores_apuntando_a_nosotros() -> list[dict]:
     return [{"indice": i, "nombre": n} for i, n in sorted(vistos.items())]
 
 
+def dns_actuales() -> dict[int, list[str]]:
+    """Qué servidores DNS tiene hoy cada adaptador activo. {indice: [ips]}."""
+    if not es_windows():
+        return {}
+    comando = (
+        "@(Get-DnsClientServerAddress -AddressFamily IPv4 | "
+        "Select-Object InterfaceIndex, ServerAddresses) | ConvertTo-Json -Compress"
+    )
+    ok, salida = _powershell(comando)
+    if not ok or not salida:
+        return {}
+    try:
+        datos = json.loads(salida)
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(datos, dict):
+        datos = [datos]
+    salida_final: dict[int, list[str]] = {}
+    for fila in datos:
+        try:
+            indice = int(fila["InterfaceIndex"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        servidores = fila.get("ServerAddresses") or []
+        if isinstance(servidores, str):
+            servidores = [servidores]
+        salida_final[indice] = [str(s) for s in servidores]
+    return salida_final
+
+
+def guardar_previos(actuales: dict[int, list[str]] | None = None) -> dict:
+    """Anota qué DNS tenía cada adaptador ANTES de que lo apuntáramos acá.
+
+    Solo se guarda lo que no somos nosotros: si esto corre dos veces seguidas
+    (prender el núcleo estando ya prendido, por ejemplo), la segunda no puede
+    pisar el original con un `127.0.0.1` y hacer que restaurar sea un no-op.
+    """
+    actuales = dns_actuales() if actuales is None else actuales
+    limpios = {
+        str(indice): [s for s in servidores if s not in NUESTRAS]
+        for indice, servidores in actuales.items()
+    }
+    limpios = {k: v for k, v in limpios.items() if v}
+    if not limpios:
+        return {}
+    try:
+        ARCHIVO_PREVIO.parent.mkdir(parents=True, exist_ok=True)
+        anterior = leer_previos()
+        # Se fusiona con lo que ya había: un adaptador que hoy no tiene DNS
+        # propio no puede borrar el que anotamos la vez pasada.
+        anterior.update(limpios)
+        ARCHIVO_PREVIO.write_text(json.dumps(anterior, indent=2), encoding="utf-8")
+        return anterior
+    except OSError:
+        return {}
+
+
+def leer_previos() -> dict:
+    try:
+        return json.loads(ARCHIVO_PREVIO.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def poner_nuestro_dns(respaldo: str = RESPALDO_POR_DEFECTO) -> dict:
+    """Apunta los adaptadores activos a nosotros, con un respaldo detrás.
+
+    Antes de tocar nada guarda lo que había. El respaldo va SEGUNDO: Windows
+    pregunta al primero y solo pasa al segundo si el primero no contesta.
+    """
+    resultado = {"adaptadores": [], "error": None, "respaldo": respaldo}
+    if not es_windows():
+        return resultado
+    guardar_previos()
+    direcciones = "'127.0.0.1'" + (f",'{respaldo}'" if respaldo else "")
+    ok, salida = _powershell(
+        "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object "
+        "{ Set-DnsClientServerAddress -InterfaceIndex $_.InterfaceIndex "
+        f"-ServerAddresses {direcciones} -ErrorAction Stop }}"
+    )
+    if not ok:
+        resultado["error"] = salida or "no pude cambiar el DNS de los adaptadores"
+        return resultado
+    _powershell("Clear-DnsClientCache")
+    resultado["adaptadores"] = [a["nombre"] for a in adaptadores_apuntando_a_nosotros()]
+    return resultado
+
+
 def restaurar_dns_automatico() -> dict:
     """Devuelve a DHCP los adaptadores que apuntan a este resolver.
 
@@ -139,11 +287,25 @@ def restaurar_dns_automatico() -> dict:
         return resultado
     resultado["hacia_falta"] = True
 
-    indices = ",".join(str(a["indice"]) for a in adaptadores)
-    ok, salida = _powershell(
-        f"{indices} | ForEach-Object {{ Set-DnsClientServerAddress "
-        "-InterfaceIndex $_ -ResetServerAddresses -ErrorAction Stop }"
-    )
+    # Se repone LO QUE HABÍA, no "automático". `-ResetServerAddresses`
+    # significa "pedile el DNS al DHCP", y en una máquina con IP fija puesta a
+    # mano no hay DHCP que conteste: el adaptador queda con cero servidores y
+    # apagar SecureDNS te deja sin resolver nombres. Solo se usa como último
+    # recurso, cuando no tenemos nada anotado de ese adaptador.
+    previos = leer_previos()
+    partes = []
+    for adaptador in adaptadores:
+        guardados = previos.get(str(adaptador["indice"]))
+        if guardados:
+            lista = ",".join(f"'{s}'" for s in guardados)
+            partes.append(f"Set-DnsClientServerAddress -InterfaceIndex "
+                          f"{adaptador['indice']} -ServerAddresses {lista} "
+                          f"-ErrorAction Stop")
+        else:
+            partes.append(f"Set-DnsClientServerAddress -InterfaceIndex "
+                          f"{adaptador['indice']} -ResetServerAddresses "
+                          f"-ErrorAction Stop")
+    ok, salida = _powershell("; ".join(partes))
     if not ok:
         # El motivo casi siempre es el mismo: cambiar el DNS de una placa pide
         # permisos de administrador. Se dice así, con el comando a mano, en vez
@@ -152,8 +314,36 @@ def restaurar_dns_automatico() -> dict:
         return resultado
 
     resultado["restaurados"] = [a["nombre"] for a in adaptadores]
+    resultado["desde_lo_guardado"] = bool(previos)
     _powershell("Clear-DnsClientCache")
+    # Verificación honesta: si después de restaurar la máquina igual no
+    # resuelve, es mejor dejarle un DNS público que dejarla "prolija" y sin
+    # internet. Es el mismo criterio que el respaldo de arriba.
+    if not _resuelve_algo():
+        indices = ",".join(str(a["indice"]) for a in adaptadores)
+        _powershell(
+            f"{indices} | ForEach-Object {{ Set-DnsClientServerAddress "
+            f"-InterfaceIndex $_ -ServerAddresses '{RESPALDO_POR_DEFECTO}' "
+            f"-ErrorAction SilentlyContinue }}")
+        resultado["rescate"] = RESPALDO_POR_DEFECTO
     return resultado
+
+
+def _resuelve_algo(nombre: str = "one.one.one.one") -> bool:
+    """¿La máquina puede resolver un nombre ahora mismo?
+
+    Se usa después de restaurar para no dejarla sin DNS en silencio. Un nombre
+    que no es de ningún servicio nuestro, para que la respuesta hable de la
+    resolución y no de si nuestra herramienta está arriba.
+    """
+    import socket
+
+    try:
+        socket.setdefaulttimeout(3)
+        socket.gethostbyname(nombre)
+        return True
+    except (OSError, socket.gaierror):
+        return False
 
 
 def restaurar_e_informar(prefijo: str = "[SecureDNS]") -> dict:

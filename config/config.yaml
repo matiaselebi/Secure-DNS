@@ -99,3 +99,23 @@ intel:
   # se consulta en disco, sin salir a la red. Si el archivo no está, el panel
   # simplemente no muestra esos datos.
   geoip_db_path: "data/geoip.db"
+
+# Qué se le pone al adaptador de red cuando SecureDNS toma el control del DNS
+# del sistema.
+dns_del_sistema:
+  # Un segundo servidor DNS que queda DETRÁS del nuestro.
+  #
+  # Existe por un problema concreto: el DNS del adaptador sobrevive al
+  # reinicio de la PC, pero SecureDNS tarda unos segundos en arrancar. En esa
+  # ventana no resolvía absolutamente nada, y si el resolver no llegaba a
+  # arrancar, no resolvía nunca más.
+  #
+  # No rompe el filtrado: Windows pregunta al primero y solo pasa al segundo
+  # si el primero NO CONTESTA. Un dominio bloqueado sí contesta (NXDOMAIN),
+  # así que el respaldo solo entra cuando SecureDNS no está.
+  #
+  # La contra, dicha de frente: mientras SecureDNS está caído, las consultas
+  # salen sin filtrar. Es fallar abierto a propósito. Vacialo ("") para volver
+  # al comportamiento anterior, que se queda sin internet pero no deja pasar
+  # nada sin filtrar.
+  respaldo: "9.9.9.9"

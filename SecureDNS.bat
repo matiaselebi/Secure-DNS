@@ -86,7 +86,10 @@ if %HUBO_ERROR%==0 (
 timeout /t 2 /nobreak >nul
 
 echo Configurando 127.0.0.1 como DNS de tus adaptadores de red activos...
-powershell -NoProfile -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { Set-DnsClientServerAddress -InterfaceIndex $_.InterfaceIndex -ServerAddresses '127.0.0.1' }" >nul 2>&1
+REM Se usa el modulo y no un powershell suelto: asi guarda que DNS tenias
+REM antes (para poder reponerlo tal cual) y deja un respaldo detras del
+REM nuestro, que es lo que evita quedarte sin internet en el arranque.
+"%PYTHON%" -c "import sys; sys.path.insert(0,'src'); from securedns import net_config; print(net_config.poner_nuestro_dns())"
 if %errorlevel% neq 0 (
     echo   ERROR: no se pudo configurar el DNS de los adaptadores.
     set HUBO_ERROR=1

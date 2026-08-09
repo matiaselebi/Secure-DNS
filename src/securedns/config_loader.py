@@ -96,10 +96,28 @@ class DashboardConfig:
 
 
 @dataclass
+class DnsDelSistemaConfig:
+    """Qué se le pone al adaptador de red cuando SecureDNS toma el control.
+
+    `respaldo` es un segundo servidor que queda DETRÁS del nuestro. Tapa la
+    ventana entre que Windows levanta la red al arrancar y que SecureDNS
+    empieza a escuchar, que es de varios segundos en cada reinicio y en la que
+    antes no resolvía absolutamente nada.
+
+    No rompe el filtrado: Windows solo pasa al segundo si el primero NO
+    contesta, y un dominio bloqueado sí contesta (NXDOMAIN). Vaciarlo ("")
+    vuelve al comportamiento anterior, que falla cerrado.
+    """
+
+    respaldo: str = "9.9.9.9"
+
+
+@dataclass
 class Config:
     dns: DnsConfig = field(default_factory=DnsConfig)
     filtering: FilteringConfig = field(default_factory=FilteringConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    dns_del_sistema: DnsDelSistemaConfig = field(default_factory=DnsDelSistemaConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     intel: IntelConfig = field(default_factory=IntelConfig)
     # Salen del entorno o del .env, nunca del YAML.
@@ -158,4 +176,5 @@ def load_config(config_path: str | None = None) -> Config:
         logging=_seccion(LoggingConfig, raw, "logging"),
         dashboard=_seccion(DashboardConfig, raw, "dashboard"),
         intel=_seccion(IntelConfig, raw, "intel"),
+        dns_del_sistema=_seccion(DnsDelSistemaConfig, raw, "dns_del_sistema"),
     )

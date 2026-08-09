@@ -21,6 +21,8 @@ import requests
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from securedns import intel_puente  # noqa: E402
+
 URLHAUS_HOSTFILE = "https://urlhaus.abuse.ch/downloads/hostfile/"
 OPENPHISH_FEED = "https://openphish.com/feed.txt"
 OUTPUT_PATH = PROJECT_ROOT / "data" / "blocklist_feeds.txt"
@@ -157,6 +159,14 @@ def main(
     min_interval_hours: float = 6,
     include_ad_tracker: bool = False,
 ) -> bool:
+    # Si Secure-Intel está clonado al lado, baja él y deja acá los mismos
+    # archivos, con las marcas de categoría incluidas. Es el único lugar donde
+    # vive la URL de cada feed. Si no está, sigue el camino de siempre.
+    if intel_puente.actualizar(forzar=force,
+                               incluir_opcionales=include_ad_tracker):
+        print("[update_blocklist] las listas las bajó Secure-Intel")
+        return True
+
     if not force and not is_stale(OUTPUT_PATH, min_interval_hours):
         print(
             f"[update_blocklist] La lista se actualizó hace menos de "

@@ -622,6 +622,74 @@ listas comparan texto: con el punto al final no matcheaba nada y la consulta
 pasaba limpita. Lo mismo con los nombres internacionales, que se comparaban
 en Unicode mientras los feeds los publican en punycode.
 
+## Los feeds los baja Secure-Intel
+
+La URL de URLhaus estaba escrita en dos lugares: acá y en SecureProxy. Igual
+OpenPhish, e igual las dos bases de db-ip. El día que abuse.ch cambie una URL,
+arreglás uno, verificás que anda, y el otro se queda bajando un 404 en
+silencio: el archivo viejo sigue ahí, el panel sigue diciendo que hay 40.000
+reglas, y nadie se entera hasta que pasa algo.
+
+[Secure-Intel](../secure-intel/) es el único lugar donde vive esa URL ahora.
+Si está clonado al lado, SecureDNS le pide que baje y deja los archivos acá; si no
+está, se bajan como siempre con el código de `scripts/update_blocklist.py`,
+que quedó intacto. Nadie está obligado a clonar un tercer repositorio.
+
+**El motor de filtrado no cambió una línea.** Secure-Intel escribe los mismos
+archivos de texto, en el mismo formato y en el mismo lugar. Lo único que
+cambia es de dónde salen esos bytes. Cambiar además el motor sería correr un
+riesgo que esta migración no necesita correr para cumplir su objetivo.
+
+
+## Si reiniciás la PC con la suite prendida
+
+El DNS de un adaptador de Windows **sobrevive al reinicio**: es una propiedad
+de la placa de red, no del proceso. Eso causaba un problema real y molesto:
+
+1. La suite prendida deja los adaptadores apuntando a `127.0.0.1`.
+2. Reiniciás la PC. Los adaptadores siguen apuntando a `127.0.0.1`.
+3. Windows levanta la red **mucho antes** que la tarea que arranca SecureDNS:
+   ya tenés el escritorio y el resolver todavía no escucha.
+4. En esa ventana **ningún nombre resuelve**. Y si el resolver no llega a
+   arrancar (le falta el venv, el puerto 53 está tomado), no resuelve más.
+
+Se sentía así: reiniciabas, abrías el navegador y no cargaba nada.
+
+**El arreglo es un DNS de respaldo detrás del nuestro.** El adaptador queda con
+`127.0.0.1` primero y `9.9.9.9` segundo. Windows pregunta al primero y **solo
+pasa al segundo si el primero no contesta**.
+
+Eso no rompe el filtrado, y el motivo es preciso: un dominio bloqueado **sí
+contesta**, responde NXDOMAIN, que es una respuesta válida y definitiva. Windows
+la acepta y no le pregunta a nadie más. El respaldo entra únicamente cuando
+SecureDNS no está.
+
+La contra, dicha de frente: mientras SecureDNS está caído, las consultas salen
+sin filtrar por el respaldo. Es fallar abierto a propósito, la misma decisión
+que el circuit breaker de SecureProxy con AbuseIPDB. Internet sin filtro es
+molesto; sin internet es inusable, y lo primero que hace cualquiera cuando "no
+anda nada" es desinstalar la herramienta. Se apaga con
+`dns_del_sistema.respaldo: ""`.
+
+## Si tenés IP fija, apagar SecureDNS te dejaba sin DNS
+
+El otro bug, más silencioso. Restaurar hacía `-ResetServerAddresses`, que
+significa "pedile el DNS al DHCP". En una máquina con **IP fija puesta a
+mano** no hay DHCP que conteste, así que el adaptador quedaba con **cero
+servidores DNS**.
+
+Ahora se **guarda qué DNS tenía cada adaptador antes de tocarlo**
+(`data/dns_previo.json`) y se repone exactamente eso. `-ResetServerAddresses`
+quedó solo como último recurso, para cuando no hay nada anotado.
+
+Y hay una verificación final honesta: después de restaurar se comprueba que la
+máquina resuelva de verdad, y si no resuelve se le deja un DNS público. Mejor
+una máquina con internet que una "prolija" y sin DNS.
+
+Un detalle de la implementación: guardar dos veces no pisa el original. Si
+prendés el núcleo estando ya prendido, la segunda vuelta ve `127.0.0.1` y lo
+descarta, porque ese somos nosotros.
+
 ## Tests
 
 ```bash

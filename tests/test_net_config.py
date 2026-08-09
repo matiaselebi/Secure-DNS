@@ -197,3 +197,107 @@ def test_el_bat_no_tiene_su_propia_copia_del_reset():
     ]
     assert not any("ResetServerAddresses" in linea for linea in lineas_activas)
     assert any("stop_dns.py" in linea for linea in lineas_activas)
+
+
+# ------------------------------------------------ el bug del reinicio
+
+
+def test_al_poner_nuestro_dns_queda_un_respaldo_detras(monkeypatch, tmp_path):
+    """El bug reportado: «reinicié la PC y no me cargaba Google».
+
+    El DNS del adaptador sobrevive al reinicio, pero SecureDNS tarda en
+    arrancar. En esa ventana no resuelve nada. El respaldo la tapa.
+    """
+    falso = _PowerShellFalso()
+    monkeypatch.setattr(net_config, "_powershell", falso)
+    monkeypatch.setattr(net_config, "es_windows", lambda: True)
+    monkeypatch.setattr(net_config, "ARCHIVO_PREVIO", tmp_path / "previo.json")
+    monkeypatch.setattr(net_config, "dns_actuales", lambda: {})
+    monkeypatch.setattr(net_config, "adaptadores_apuntando_a_nosotros", lambda: [])
+
+    net_config.poner_nuestro_dns()
+    puesto = next(c for c in falso.comandos if "Set-DnsClientServerAddress" in c)
+    assert "'127.0.0.1'" in puesto
+    assert "'9.9.9.9'" in puesto
+    # El orden importa: Windows pregunta al primero y solo pasa al segundo si
+    # el primero no contesta. Al revés, nunca se usaría el nuestro.
+    assert puesto.index("127.0.0.1") < puesto.index("9.9.9.9")
+
+
+def test_el_respaldo_se_puede_apagar(monkeypatch, tmp_path):
+    falso = _PowerShellFalso()
+    monkeypatch.setattr(net_config, "_powershell", falso)
+    monkeypatch.setattr(net_config, "es_windows", lambda: True)
+    monkeypatch.setattr(net_config, "ARCHIVO_PREVIO", tmp_path / "previo.json")
+    monkeypatch.setattr(net_config, "dns_actuales", lambda: {})
+    monkeypatch.setattr(net_config, "adaptadores_apuntando_a_nosotros", lambda: [])
+
+    net_config.poner_nuestro_dns(respaldo="")
+    puesto = next(c for c in falso.comandos if "Set-DnsClientServerAddress" in c)
+    assert "9.9.9.9" not in puesto
+
+
+# ---------------------------------------- el bug de la IP fija
+
+
+def test_se_guarda_lo_que_habia_antes_de_pisarlo(monkeypatch, tmp_path):
+    archivo = tmp_path / "previo.json"
+    monkeypatch.setattr(net_config, "ARCHIVO_PREVIO", archivo)
+    monkeypatch.setattr(net_config, "es_windows", lambda: True)
+    net_config.guardar_previos({12: ["192.168.0.1", "8.8.8.8"]})
+    assert net_config.leer_previos()["12"] == ["192.168.0.1", "8.8.8.8"]
+
+
+def test_guardar_dos_veces_no_pisa_el_original_con_el_nuestro(monkeypatch, tmp_path):
+    """Prender el núcleo estando ya prendido no puede borrar el DNS real."""
+    monkeypatch.setattr(net_config, "ARCHIVO_PREVIO", tmp_path / "previo.json")
+    monkeypatch.setattr(net_config, "es_windows", lambda: True)
+    net_config.guardar_previos({12: ["192.168.0.1"]})
+    net_config.guardar_previos({12: ["127.0.0.1"]})
+    assert net_config.leer_previos()["12"] == ["192.168.0.1"]
+
+
+def test_restaurar_repone_lo_guardado_y_no_resetea(monkeypatch, tmp_path):
+    """Con IP fija, `-ResetServerAddresses` deja el adaptador con CERO
+    servidores DNS: apagar SecureDNS te dejaba sin resolver nombres."""
+    falso = _PowerShellFalso()
+    monkeypatch.setattr(net_config, "_powershell", falso)
+    monkeypatch.setattr(net_config, "es_windows", lambda: True)
+    monkeypatch.setattr(net_config, "ARCHIVO_PREVIO", tmp_path / "previo.json")
+    monkeypatch.setattr(net_config, "_resuelve_algo", lambda *a: True)
+    monkeypatch.setattr(net_config, "adaptadores_apuntando_a_nosotros",
+                        lambda: [{"indice": 12, "nombre": "Ethernet"}])
+    net_config.guardar_previos({12: ["192.168.0.1"]})
+
+    resultado = net_config.restaurar_dns_automatico()
+    puesto = next(c for c in falso.comandos if "Set-DnsClientServerAddress" in c)
+    assert "'192.168.0.1'" in puesto
+    assert "ResetServerAddresses" not in puesto
+    assert resultado["desde_lo_guardado"]
+
+
+def test_sin_nada_guardado_se_cae_a_automatico(monkeypatch, tmp_path):
+    """Es el comportamiento viejo, y queda solo como último recurso."""
+    falso = _PowerShellFalso()
+    monkeypatch.setattr(net_config, "_powershell", falso)
+    monkeypatch.setattr(net_config, "es_windows", lambda: True)
+    monkeypatch.setattr(net_config, "ARCHIVO_PREVIO", tmp_path / "no-existe.json")
+    monkeypatch.setattr(net_config, "_resuelve_algo", lambda *a: True)
+    monkeypatch.setattr(net_config, "adaptadores_apuntando_a_nosotros",
+                        lambda: [{"indice": 12, "nombre": "Ethernet"}])
+    net_config.restaurar_dns_automatico()
+    assert any("ResetServerAddresses" in c for c in falso.comandos)
+
+
+def test_si_despues_de_restaurar_no_resuelve_se_pone_un_dns_publico(monkeypatch, tmp_path):
+    """Mejor una máquina con internet que una «prolija» y sin DNS."""
+    falso = _PowerShellFalso()
+    monkeypatch.setattr(net_config, "_powershell", falso)
+    monkeypatch.setattr(net_config, "es_windows", lambda: True)
+    monkeypatch.setattr(net_config, "ARCHIVO_PREVIO", tmp_path / "no-existe.json")
+    monkeypatch.setattr(net_config, "_resuelve_algo", lambda *a: False)
+    monkeypatch.setattr(net_config, "adaptadores_apuntando_a_nosotros",
+                        lambda: [{"indice": 12, "nombre": "Ethernet"}])
+    resultado = net_config.restaurar_dns_automatico()
+    assert resultado.get("rescate") == "9.9.9.9"
+    assert any("9.9.9.9" in c for c in falso.comandos)

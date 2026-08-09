@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
 from .blocklist import Allowlist, Blocklist, nombre_de_categoria
+from .deteccion import dominio_padre
 from .dns_server import ThreatIntelResolver
 from .logger_db import LoggerDB
 from .puntaje import calcular as calcular_puntaje
@@ -1032,17 +1033,28 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         dominio = str(fila["domain"] or "")
         origen = str(fila["source"] or "")
         categoria = str(fila.get("category") or "")
+        bloqueada = bool(fila["blocked"])
         datos = [
-            ("Nombre consultado", dominio),
-            ("Tipo de registro", str(fila["qtype"] or "")),
-            ("Equipo que consultó", str(fila["client_ip"] or "")),
-            ("Fecha y hora", formatear_fecha(fila["timestamp"])),
+            ("Nombre consultado", dominio, ""),
+            ("Dominio padre", dominio_padre(dominio), ""),
+            ("Tipo de registro", str(fila["qtype"] or ""), ""),
+            ("Equipo que consultó", str(fila["client_ip"] or ""), ""),
+            ("Fecha y hora", formatear_fecha(fila["timestamp"]), ""),
+            # El estado va con color: es lo primero que uno busca al abrir el
+            # detalle, y en gris se pierde entre las otras quince líneas.
+            ("Resultado", "bloqueada" if bloqueada else "resuelta",
+             "malo" if bloqueada else "bueno"),
             ("De dónde salió la respuesta",
-             self.NOMBRES_DE_ORIGEN.get(origen, origen or "sin dato")),
-            ("Cuánto tardó", self._ms(fila["duration_ms"])),
+             self.NOMBRES_DE_ORIGEN.get(origen, origen or "sin dato"), ""),
+            ("Cuánto tardó", self._ms(fila["duration_ms"]), ""),
         ]
         if fila.get("dest_ip"):
-            datos.append(("Resolvió a", str(fila["dest_ip"])))
+            datos.append(("Resolvió a", str(fila["dest_ip"]), ""))
+        elif bloqueada:
+            datos.append((
+                "Resolvió a",
+                "no aplica: se bloqueó antes de salir a preguntar", "",
+            ))
         # Se muestran solo si están: que falte el país no significa lo mismo
         # que "no hay base descargada", puede ser una IP privada o un tipo de
         # consulta que no devuelve direcciones.
@@ -1051,29 +1063,30 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             ("ASN", "asn"),
             ("Proveedor", "provider"),
         ):
-            if fila.get(clave):
-                datos.append((etiqueta, str(fila[clave])))
-        if not fila["blocked"] and str(fila["source"] or "") != "error":
+            datos.append((etiqueta, str(fila.get(clave) or "-"), ""))
+        if not bloqueada and str(fila["source"] or "") != "error":
             datos.append((
                 "DNSSEC",
                 "el upstream validó la firma" if fila.get("dnssec")
                 else "sin firma validada (la mayoría de internet todavía no firma)",
+                "bueno" if fila.get("dnssec") else "",
             ))
-        if fila["blocked"]:
+        if bloqueada:
             datos.append(("Categoría", nombre_de_categoria(categoria) if categoria
-                          else "sin clasificar"))
-        if fila["reason"]:
-            datos.append(("Motivo", str(fila["reason"])))
+                          else "sin clasificar", ""))
+        datos.append(("Motivo", str(fila["reason"] or "-"),
+                      "malo" if bloqueada and fila["reason"] else ""))
         if fila["noisy"]:
             datos.append((
                 "Filtro de ruido",
                 "marcada como telemetría: no aparece en las estadísticas mientras "
-                "el filtro esté activo, pero se registró igual",
+                "el filtro esté activo, pero se registró igual", "",
             ))
+        datos.append(("ID en el historial", str(fila.get("id") or "-"), ""))
         filas_html = "".join(
             f"<div class='detalle-fila'><span class='detalle-clave'>{clave}</span>"
-            f"<span class='detalle-valor'>{html_lib.escape(str(valor))}</span></div>"
-            for clave, valor in datos
+            f"<span class='detalle-valor {estilo}'>{html_lib.escape(str(valor))}</span></div>"
+            for clave, valor, estilo in datos
         )
         return f"<div class='detalle-caja'>{filas_html}</div>"
 
@@ -2184,11 +2197,25 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
   /* Detalle de una consulta: fila oculta que se despliega desde "Detalle". */
   tr.detalle {{ display:none; }}
   tr.detalle.abierta {{ display:table-row; }}
-  tr.detalle > td {{ background:#12151c; }}
-  .detalle-caja {{ display:flex; flex-direction:column; gap:0.3rem; padding:0.3rem 0; }}
-  .detalle-fila {{ display:flex; gap:0.75rem; font-size:0.82rem; align-items:baseline; }}
-  .detalle-clave {{ width:16rem; min-width:16rem; color:#9aa0a6; }}
-  .detalle-valor {{ color:#e6e6e6; word-break:break-all; }}
+  tr.detalle > td {{ background:#12151c; padding:0.4rem 0.6rem; }}
+  /* El detalle es una TARJETA, no unas líneas sueltas debajo de la fila.
+     Con el borde y el fondo propio se lee como "esto es lo que sabemos de
+     esta consulta" y no como una continuación de la tabla, que era el
+     problema: se confundía con la fila siguiente. Es el mismo formato que el
+     detalle de SecureProxy, para que los tres paneles se lean igual. */
+  .detalle-caja {{ display:flex; flex-direction:column; background:#161922;
+                   border:1px solid #2a2e37; border-radius:10px;
+                   padding:0.9rem 1.1rem; margin:0.3rem 0; }}
+  .detalle-fila {{ display:flex; gap:0.75rem; font-size:0.86rem;
+                   align-items:baseline; padding:0.28rem 0; flex-wrap:wrap; }}
+  .detalle-fila + .detalle-fila {{ border-top:1px solid #1d2029; }}
+  .detalle-clave {{ width:15rem; min-width:15rem; color:#9aa0a6; }}
+  /* Monoespaciada: la mitad de estos valores son direcciones, puertos y
+     tiempos, y en una fuente proporcional cuesta compararlos entre filas. */
+  .detalle-valor {{ color:#e6e6e6; word-break:break-all;
+                    font-family:Consolas,"Courier New",monospace; }}
+  .detalle-valor.malo {{ color:#ff8a8a; }}
+  .detalle-valor.bueno {{ color:#7bd88f; }}
   /* Tarjetitas de rendimiento, más chicas que las de arriba de todo. */
   .mini-tarjetas {{ display:flex; gap:1rem; flex-wrap:wrap; margin:0.6rem 0 0.4rem; }}
   .mini-tarjetas > div {{ background:#161922; border:1px solid #2a2e37; border-radius:8px;
