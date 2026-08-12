@@ -113,3 +113,30 @@ jobs:
           test ! -f data/dns.pid || { echo "quedó el PID file huérfano"; exit 1; }
 
           git checkout config/config.yaml
+
+  # ---------------------------------------------------------------- Windows
+  #
+  # Un job APARTE y no una matriz sobre el job de Linux, a propósito. El de
+  # Linux tiene pasos escritos en bash (prender el servicio, pegarle, apagarlo)
+  # que en un runner de Windows no corren. Meterlos en una matriz obligaría a
+  # llenarlos de condicionales; así, cada job hace lo que sabe hacer.
+  #
+  # Windows corre los tests unitarios y nada más. Alcanza para lo que este job
+  # viene a cuidar: que arreglar algo de Linux no rompa Windows sin que nadie
+  # se entere hasta prender la suite en la PC.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run tests
+        run: pytest tests/ -q

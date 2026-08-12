@@ -177,13 +177,16 @@ def test_stop_dns_restaura_el_dns():
     """Es el que llama SecureCenter: era el camino por donde aparecía el bug."""
     fuente = _fuente("scripts/stop_dns.py")
     assert "net_config" in fuente
-    assert "restaurar_e_informar" in fuente
+    # La variante que mira el modo primero: en modo Pi-hole SecureDNS nunca
+    # tocó el adaptador, así que restaurarlo sería pisar la red de una máquina
+    # donde el DNS lo administra otro.
+    assert "devolver_el_dns_si_corresponde" in fuente
 
 
 def test_el_resolver_restaura_al_cerrarse():
     """Ctrl+C y el botón del panel salen por el mismo `finally`."""
     fuente = _fuente("scripts/run_dns.py")
-    assert "net_config.restaurar_e_informar()" in fuente
+    assert "net_config.devolver_el_dns_si_corresponde()" in fuente
 
 
 def test_el_bat_no_tiene_su_propia_copia_del_reset():

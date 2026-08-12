@@ -210,12 +210,53 @@ def test_dot_retries_once_with_fresh_connection(tmp_path, monkeypatch):
         def close(self):
             pass
 
-    resolver._dot_conns["9.9.9.9"] = DeadSocket()
+    slot = resolver._dot_slot(b"ping")
+    resolver._dot_conns[("9.9.9.9", slot)] = DeadSocket()
     monkeypatch.setattr(
         ThreatIntelResolver, "_dot_connect", lambda self, ip, name: LiveSocket()
     )
 
     assert resolver._dot_query("9.9.9.9", "dns.quad9.net", b"ping") == b"pong"
+
+
+def test_dot_usa_mas_de_una_conexion_en_paralelo(tmp_path, monkeypatch):
+    resolver = make_resolver(tmp_path, upstream_mode="dot")
+    barrera = threading.Barrier(2)
+
+    class SocketCoordinado:
+        def sendall(self, data):
+            barrera.wait(timeout=1)
+            self._out = encode_tcp_query(b"pong")
+
+        def recv(self, n):
+            chunk, self._out = self._out[:n], self._out[n:]
+            return chunk
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        ThreatIntelResolver, "_dot_connect",
+        lambda self, ip, name: SocketCoordinado(),
+    )
+    resultados = [None, None]
+
+    def consultar(indice, payload):
+        resultados[indice] = resolver._dot_query(
+            "9.9.9.9", "dns.quad9.net", payload,
+        )
+
+    hilos = [
+        threading.Thread(target=consultar, args=(0, b"\x00\x00a")),
+        threading.Thread(target=consultar, args=(1, b"\x00\x01b")),
+    ]
+    for hilo in hilos:
+        hilo.start()
+    for hilo in hilos:
+        hilo.join(timeout=2)
+
+    assert not any(hilo.is_alive() for hilo in hilos)
+    assert resultados == [b"pong", b"pong"]
 
 
 # ---------- 3) TLS real contra un servidor DoT local ----------

@@ -1,4 +1,21 @@
 dns:
+  # QUIÉN RESUELVE. Es la clave más importante del archivo.
+  #
+  #   "propio" -> SecureDNS resuelve: abre el puerto 53, habla DoT, cachea y
+  #               se pone como DNS del sistema. Es como funcionó siempre.
+  #   "pihole" -> resuelve Pi-hole. SecureDNS NO abre el 53 y NO toca el DNS
+  #               del sistema: le publica las listas, le importa las consultas
+  #               y les corre encima la detección de túneles, las categorías,
+  #               los hallazgos normales y el puntaje.
+  #   "auto"   -> pihole si pihole.habilitado es true; propio si no.
+  #
+  # La respuesta se calcula en un solo lugar (src/securedns/modo.py) a
+  # propósito: cambia el comportamiento de cinco partes distintas, y olvidarse
+  # de una deja al sistema apuntando a un resolutor que no está escuchando,
+  # que es quedarse sin internet sin un solo mensaje de error.
+  #
+  # Todo lo que sigue en esta sección aplica SOLO en modo propio.
+  modo: "auto"
   host: "127.0.0.1"
   port: 53
   # Timeout (segundos) esperando respuesta de cada servidor upstream.
@@ -119,3 +136,63 @@ dns_del_sistema:
   # al comportamiento anterior, que se queda sin internet pero no deja pasar
   # nada sin filtrar.
   respaldo: "9.9.9.9"
+
+# Publicarle a Pi-hole las listas que junta Secure-Intel.
+#
+# Esto es el primer paso de un cambio grande: Pi-hole pasa a ser el que
+# resuelve y bloquea, y SecureDNS pasa a ser el que le dice qué bloquear y el
+# que después lee lo que pasó. Deja de haber un resolutor propio que mantener.
+#
+# La regla que ordena todo esto: a Pi-hole se le habla por su API REST, que
+# es la puerta que él documenta y que usa su propio panel. NUNCA metiendo
+# filas en /etc/pihole/gravity.db, que es una base interna suya: el esquema
+# cambia entre versiones y el propio `pihole -g` la reconstruye, así que lo
+# que escribas a mano puede desaparecer sin aviso.
+#
+# La contraseña va en el .env como PIHOLE_PASSWORD, nunca acá. Generala en el
+# panel de Pi-hole como "app password": se puede revocar sola y funciona
+# aunque tengas 2FA.
+pihole:
+  # Apagado por defecto. Si no tenés Pi-hole, nada de esto se ejecuta ni
+  # aparece un error de conexión en cada arranque.
+  habilitado: false
+  url: "http://127.0.0.1"
+  # Solo importa si la url es https con certificado propio. Apagarlo es
+  # aceptar que alguien en el medio lea la contraseña.
+  verificar_tls: true
+  # Dónde se deja el archivo de listas. Tiene que existir y hay que poder
+  # escribirlo: creála con `sudo mkdir -p /etc/pihole/securesuite` y dale
+  # permiso al usuario que corre SecureDNS.
+  carpeta_listas: "/etc/pihole/securesuite"
+  nombre_lista: "secureintel_dominios.txt"
+  # Vacío = file://<carpeta_listas>/<nombre_lista>, que es lo correcto cuando
+  # SecureDNS y Pi-hole corren en la misma máquina. Si están en máquinas
+  # distintas, file:// no sirve (Pi-hole buscaría el archivo en SU disco):
+  # hay que servir la lista por HTTP y poner esa URL acá.
+  address: ""
+  comentario: "SecureSuite / Secure-Intel (no editar a mano)"
+  # Si después de publicar se le pide a Pi-hole que reconstruya (gravity).
+  # En false la lista queda escrita y registrada, pero no aplica hasta el
+  # próximo gravity. Útil si ya tenés un cron tuyo que lo corre.
+  correr_gravity: true
+  horas_entre_publicaciones: 6
+
+  # --- Fase 3: traer las consultas de Pi-hole para analizarlas acá ---
+  #
+  # Pi-hole resuelve y bloquea; SecureDNS le corre encima lo que Pi-hole no
+  # hace: detección de túneles de DNS por la forma del tráfico, categorías
+  # propias, marcado de hallazgos como normales y el puntaje.
+  #
+  # Lo que se gana: Pi-hole atiende a TODA la casa, así que la detección pasa
+  # de mirar una sola máquina a mirar el teléfono, la tele y la notebook de al
+  # lado, cada uno con su IP.
+  #
+  # La base se abre en SOLO LECTURA, siempre. Y tiene que estar en esta misma
+  # máquina: SQLite no se lee por red.
+  base_consultas: "/etc/pihole/pihole-FTL.db"
+  # Hasta qué fila se leyó. Es estado nuestro, no de Pi-hole.
+  marca_de_agua: "data/pihole_marca.json"
+  importar_consultas: true
+  # Cada 5 minutos alcanza: la detección mira ventanas de horas, no de
+  # segundos.
+  minutos_entre_importaciones: 5

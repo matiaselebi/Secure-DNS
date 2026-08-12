@@ -107,7 +107,7 @@ def test_el_ttl_tiene_techo(tmp_path):
     resolver.resolve(DNSRecord.question("eterno.com"), _H())
 
     _datos, vence = resolver._cache[("eterno.com", QTYPE.A)]
-    assert vence - time.time() <= MAX_TTL + 1
+    assert vence - time.monotonic() <= MAX_TTL + 1
 
 
 def test_una_respuesta_gigante_no_se_cachea(tmp_path):

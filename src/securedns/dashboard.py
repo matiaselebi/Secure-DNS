@@ -1205,13 +1205,13 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             detalle = (
                 "<div class='mini-tarjetas'>"
                 f"<div><span class='mini-valor'>{self._ms(lat['promedio'])}</span>"
-                "<span class='mini-label'>Promedio saliendo a internet</span></div>"
+                "<span class='mini-label'>Promedio a internet (24 h)</span></div>"
                 f"<div><span class='mini-valor'>{self._ms(lat['minimo'])}</span>"
-                "<span class='mini-label'>La más rápida</span></div>"
+                "<span class='mini-label'>La más rápida (24 h)</span></div>"
                 f"<div><span class='mini-valor'>{self._ms(lat['maximo'])}</span>"
-                "<span class='mini-label'>La más lenta</span></div>"
+                "<span class='mini-label'>La más lenta (24 h)</span></div>"
                 f"<div><span class='mini-valor'>{self._ms(lat['cache_promedio'])}</span>"
-                "<span class='mini-label'>Promedio desde caché</span></div>"
+                "<span class='mini-label'>Promedio desde caché (24 h)</span></div>"
                 "</div>"
             )
 

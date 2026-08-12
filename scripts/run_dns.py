@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""Punto de entrada: levanta el resolver DNS + el dashboard web."""
+"""Punto de entrada de SecureDNS. Levanta dos cosas distintas según el modo.
+
+EN MODO PROPIO (como funcionó siempre)
+    el resolutor en el puerto 53 más el panel.
+
+EN MODO PI-HOLE (la jubilación del resolutor)
+    NO se abre el 53 y NO se toca el DNS del sistema. Se levanta el panel, se
+    le publican las listas a Pi-hole cada tantas horas, y se le importan las
+    consultas cada pocos minutos para correrles encima la detección de
+    túneles, las categorías, los hallazgos normales y el puntaje.
+
+Quién resuelve lo decide `src/securedns/modo.py`, en un solo lugar. Ver el
+comentario de `dns.modo` en el config.yaml.
+"""
 
 import os
 import sys
@@ -30,7 +43,10 @@ from securedns.geoip import GeoIP  # noqa: E402
 from securedns.notifier import TelegramNotifier  # noqa: E402
 from securedns.logger_db import LoggerDB  # noqa: E402
 from securedns.rdap import ClienteRDAP  # noqa: E402
+from securedns import modo as modo_dns  # noqa: E402
 from securedns import net_config  # noqa: E402
+from securedns import pihole_consultas, publicador  # noqa: E402
+from securedns.pihole_api import ClientePihole  # noqa: E402
 from securedns.view_prefs import PreferenciasDeVista  # noqa: E402
 from securedns.hallazgos import HallazgosNormales  # noqa: E402
 
@@ -106,6 +122,54 @@ def _consolidar_periodicamente(logger_db: LoggerDB) -> None:
             print(f"[SecureDNS] no se pudo resumir el historial: {exc}")
 
 
+def _publicar_periodicamente(cfg) -> None:
+    """Le deja a Pi-hole las listas de Secure-Intel, cada tantas horas.
+
+    Corre en su propio hilo y nunca lanza: que Pi-hole esté apagado o que la
+    carpeta no tenga permiso no puede tumbar el panel. El publicador ya se
+    niega solo a publicar una lista vacía o encogida, así que este bucle no
+    tiene que decidir nada.
+    """
+    espera = max(600.0, float(cfg.pihole.horas_entre_publicaciones) * 3600.0)
+    while True:
+        cliente = ClientePihole(cfg.pihole.url, cfg.pihole_password,
+                                verificar_tls=cfg.pihole.verificar_tls)
+        try:
+            informe = publicador.publicar(cfg, cliente)
+            print(f"[SecureDNS] Pi-hole: {informe['detalle']}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[SecureDNS] no pude publicar en Pi-hole: {exc}")
+        finally:
+            cliente.salir()
+        time.sleep(espera)
+
+
+def _importar_periodicamente(cfg, logger_db, blocklist, vista) -> None:
+    """Trae las consultas de Pi-hole cada pocos minutos.
+
+    La categoría se calcula contra NUESTRAS listas: Pi-hole sabe que bloqueó
+    pero no si fue malware, phishing o publicidad, porque gravity mezcla todas
+    las listas en una sola bolsa. Eso es lo que hace que lo importado sea
+    material nuestro y no una copia.
+    """
+    def categoria_de(dominio: str) -> str:
+        return blocklist.categoria_de(dominio) if blocklist.is_blocked(dominio) else ""
+
+    es_ruido = vista.es_ruidoso if vista is not None else None
+    espera = max(60.0, float(cfg.pihole.minutos_entre_importaciones) * 60.0)
+    while True:
+        try:
+            informe = pihole_consultas.importar(
+                cfg, logger_db, categoria_de=categoria_de, es_ruido=es_ruido)
+            if informe.get("importadas") or not informe.get("ok"):
+                print(f"[SecureDNS] {informe['detalle']}")
+        except Exception as exc:  # noqa: BLE001
+            # Una vuelta que falla no puede matar el bucle: la siguiente
+            # arranca desde la misma marca de agua y no se pierde nada.
+            print(f"[SecureDNS] la importación desde Pi-hole falló: {exc}")
+        time.sleep(espera)
+
+
 def main() -> None:
     cfg = load_config()
 
@@ -161,22 +225,33 @@ def main() -> None:
     if cfg.intel.rdap_enabled:
         print("[SecureDNS] edad de dominios por RDAP: activada (solo para hallazgos)")
 
-    resolver = ThreatIntelResolver(
-        blocklist=blocklist,
-        logger_db=logger_db,
-        upstream_primary=cfg.dns.upstream_primary,
-        upstream_fallback=cfg.dns.upstream_fallback,
-        upstream_timeout=cfg.dns.upstream_timeout,
-        min_cache_ttl=cfg.dns.min_cache_ttl,
-        allowlist=allowlist,
-        upstream_mode=cfg.dns.upstream_mode,
-        upstream_primary_tls_name=cfg.dns.upstream_primary_tls_name,
-        upstream_fallback_tls_name=cfg.dns.upstream_fallback_tls_name,
-        dot_fallback_to_udp=cfg.dns.dot_fallback_to_udp,
-        vista=vista,
-        block_mode=cfg.filtering.block_mode,
-        geoip=geoip,
-    )
+    # ---- quién resuelve, y por lo tanto qué se levanta ----
+    info = modo_dns.descripcion(cfg)
+    resuelve_pihole = info["modo"] == modo_dns.PIHOLE
+
+    if resuelve_pihole:
+        # No se construye el resolutor. No es solo para ahorrar memoria: si se
+        # construyera, el panel mostraría un caché con entradas y un upstream
+        # configurado que no está atendiendo ni una consulta. Un panel que
+        # describe un resolutor apagado es peor que uno que no lo muestra.
+        resolver = modo_dns.ResolutorJubilado()
+    else:
+        resolver = ThreatIntelResolver(
+            blocklist=blocklist,
+            logger_db=logger_db,
+            upstream_primary=cfg.dns.upstream_primary,
+            upstream_fallback=cfg.dns.upstream_fallback,
+            upstream_timeout=cfg.dns.upstream_timeout,
+            min_cache_ttl=cfg.dns.min_cache_ttl,
+            allowlist=allowlist,
+            upstream_mode=cfg.dns.upstream_mode,
+            upstream_primary_tls_name=cfg.dns.upstream_primary_tls_name,
+            upstream_fallback_tls_name=cfg.dns.upstream_fallback_tls_name,
+            dot_fallback_to_udp=cfg.dns.dot_fallback_to_udp,
+            vista=vista,
+            block_mode=cfg.filtering.block_mode,
+            geoip=geoip,
+        )
 
     # Lo que levanta el botón "Apagar resolver" del panel. Se hace con un
     # evento y no mandándose una señal a sí mismo porque en Windows no hay
@@ -185,7 +260,8 @@ def main() -> None:
     # que el de Ctrl+C en los dos sistemas.
     detener = threading.Event()
 
-    dns_server = build_dns_server(cfg.dns.host, cfg.dns.port, resolver)
+    dns_server = (None if resuelve_pihole
+                  else build_dns_server(cfg.dns.host, cfg.dns.port, resolver))
     dashboard_server = build_dashboard_server(
         cfg.dashboard.host, cfg.dashboard.port, logger_db, allowlist, blocklist, resolver,
         vista=vista, apagar=detener.set, rdap=rdap, normales=normales,
@@ -194,16 +270,26 @@ def main() -> None:
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     PID_FILE.write_text(str(os.getpid()))
 
-    print(f"[SecureDNS] resolver escuchando en {cfg.dns.host}:{cfg.dns.port} (UDP)")
-    if cfg.dns.upstream_mode == "dot":
-        modo = "DNS-over-TLS (cifrado, puerto 853)"
-        if cfg.dns.dot_fallback_to_udp:
-            modo += " con respaldo UDP plano"
+    print(f"[SecureDNS] {info['titulo']}")
+    if resuelve_pihole:
+        print(f"[SecureDNS] {info['detalle']}")
+        # Decir qué NO está funcionando es la mitad del trabajo. Sin esta
+        # línea, alguien lee "SecureDNS arrancó" y da por hecho que hay un
+        # resolutor propio filtrando, que es justo lo que no hay.
+        print("[SecureDNS] en este modo NO aplica: " + ", ".join(info["no_aplica"]))
+        print(f"[SecureDNS] Pi-hole: {cfg.pihole.url}")
+        print(f"[SecureDNS] consultas de Pi-hole: {cfg.pihole.base_consultas}")
     else:
-        modo = "UDP texto plano (puerto 53)"
-    print(f"[SecureDNS] modo upstream: {modo}")
-    print(f"[SecureDNS] upstream primario: {cfg.dns.upstream_primary} (Quad9)")
-    print(f"[SecureDNS] upstream de respaldo: {cfg.dns.upstream_fallback} (Cloudflare)")
+        print(f"[SecureDNS] resolver escuchando en {cfg.dns.host}:{cfg.dns.port} (UDP)")
+        if cfg.dns.upstream_mode == "dot":
+            como = "DNS-over-TLS (cifrado, puerto 853)"
+            if cfg.dns.dot_fallback_to_udp:
+                como += " con respaldo UDP plano"
+        else:
+            como = "UDP texto plano (puerto 53)"
+        print(f"[SecureDNS] modo upstream: {como}")
+        print(f"[SecureDNS] upstream primario: {cfg.dns.upstream_primary} (Quad9)")
+        print(f"[SecureDNS] upstream de respaldo: {cfg.dns.upstream_fallback} (Cloudflare)")
     print(f"[SecureDNS] dashboard: http://{cfg.dashboard.host}:{cfg.dashboard.port}/")
     print(f"[SecureDNS] logs: {cfg.resolve_path(cfg.logging.db_path)}")
     print(f"[SecureDNS] PID: {os.getpid()} (guardado en {PID_FILE})")
@@ -250,19 +336,36 @@ def main() -> None:
             + (", ".join(canales) if canales else "sin canales disponibles")
         )
 
-    dns_server.start_thread()
+    if resuelve_pihole:
+        # Los dos hilos que reemplazan al resolutor: uno le deja las listas a
+        # Pi-hole y el otro le trae las consultas para analizarlas acá.
+        threading.Thread(target=_publicar_periodicamente, args=(cfg,),
+                         daemon=True).start()
+        if cfg.pihole.importar_consultas:
+            threading.Thread(target=_importar_periodicamente,
+                             args=(cfg, logger_db, blocklist, vista),
+                             daemon=True).start()
+            print(f"[SecureDNS] importando de Pi-hole cada "
+                  f"{cfg.pihole.minutos_entre_importaciones} minutos")
+
+    if dns_server is not None:
+        dns_server.start_thread()
     try:
         # Se sale del bucle por tres caminos: Ctrl+C, el botón del panel, o
         # que el servidor DNS se haya muerto solo. Los tres terminan en el
-        # mismo `finally`, así que el cierre es idéntico.
-        while dns_server.isAlive() and not detener.wait(0.5):
-            pass
+        # mismo `finally`, así que el cierre es idéntico. En modo Pi-hole no
+        # hay servidor que se pueda morir, así que solo quedan los dos
+        # primeros.
+        while not detener.wait(0.5):
+            if dns_server is not None and not dns_server.isAlive():
+                break
         if detener.is_set():
             print("\n[SecureDNS] apagando por pedido del panel...")
     except KeyboardInterrupt:
         print("\n[SecureDNS] deteniendo...")
     finally:
-        dns_server.stop()
+        if dns_server is not None:
+            dns_server.stop()
         dashboard_server.shutdown()
         if PID_FILE.exists():
             PID_FILE.unlink()
@@ -274,8 +377,13 @@ def main() -> None:
         # .bat lo restauraba; apagar desde SecureCenter, con Ctrl+C o desde
         # el panel, no. Ahora lo hace el propio resolver, salga por donde
         # salga, y solo sobre los adaptadores que apuntan a él.
+        #
+        # `devolver_el_dns_si_corresponde` y no `restaurar_e_informar` a
+        # secas: en modo Pi-hole nunca tocamos el adaptador, así que
+        # restaurarlo al salir sería manotear la configuración de red de una
+        # máquina donde el DNS lo administra otro.
         if cfg.dns.port == 53:
-            net_config.restaurar_e_informar()
+            net_config.devolver_el_dns_si_corresponde()
         print("[SecureDNS] listo, todo cerrado.")
 
 

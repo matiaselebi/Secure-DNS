@@ -67,9 +67,14 @@ def main() -> None:
     # justamente cuando no lo hay: el resolver ya se murió (se colgó, lo mató
     # Windows, se cerró la sesión) y los adaptadores quedaron apuntando a un
     # 127.0.0.1 vacío. Ahí es cuando más falta hace.
-    resultado = net_config.restaurar_e_informar()
+    #
+    # La variante "_si_corresponde" mira el modo antes: si acá resuelve
+    # Pi-hole, SecureDNS nunca tocó el adaptador y no tiene por qué tocarlo
+    # ahora. Restaurarlo igual sería manotear la red de una máquina donde el
+    # DNS lo administra otro.
+    resultado = net_config.devolver_el_dns_si_corresponde()
 
-    if not detenido and not resultado["hacia_falta"]:
+    if not detenido and not resultado.get("hacia_falta"):
         sys.exit(1)
 
 

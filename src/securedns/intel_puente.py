@@ -48,6 +48,50 @@ def disponible(raiz=None) -> bool:
     return buscar(raiz) is not None
 
 
+def valores(tipo: str, categorias, raiz=None) -> set:
+    """Los indicadores que tiene Secure-Intel, leídos de su base.
+
+    Existe para el publicador de Pi-hole. Hasta ahora al DNS le alcanzaba con
+    el archivo de texto que Secure-Intel le exporta, pero ese archivo está en
+    el formato del resolutor (con las marcas `# categoria:` adelante de cada
+    bloque) y lo que hay que dejarle a gravity es una lista pelada. Pedirle
+    los valores a la base y armar el archivo acá evita agregarle a
+    Secure-Intel un tercer formato de exportación para un consumidor que
+    todavía puede cambiar de forma.
+
+    Devuelve un conjunto vacío si Secure-Intel no está o si algo falla. El que
+    llama tiene que tratar ese vacío como "no sé", nunca como "no hay nada que
+    bloquear": son cosas muy distintas cuando del otro lado hay un Pi-hole
+    esperando una lista.
+    """
+    carpeta = buscar(raiz)
+    if carpeta is None:
+        return set()
+    ruta_src = str(carpeta / "src")
+    if ruta_src not in sys.path:
+        sys.path.insert(0, ruta_src)
+    try:
+        from secureintel.base import Intel, buscar_base
+
+        # `buscar_base` espera la carpeta que CONTIENE a Secure-Intel, no la
+        # de Secure-Intel. Pasarle la equivocada igual funcionaba de casualidad
+        # (cae a una ruta relativa a su propio archivo), y esas casualidades
+        # son las que se rompen cuando alguien reacomoda las carpetas.
+        intel = Intel(buscar_base(carpeta.parent))
+        try:
+            if not intel.disponible():
+                return set()
+            juntos: set = set()
+            for categoria in categorias:
+                juntos |= intel.valores(tipo, categoria)
+            return juntos
+        finally:
+            intel.close()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[SecureDNS] no pude leer la base de Secure-Intel ({exc})")
+        return set()
+
+
 def actualizar(forzar: bool = False, raiz=None,
                incluir_opcionales: bool | None = None) -> bool:
     """Le pide a Secure-Intel que baje y exporte. True si se hizo.

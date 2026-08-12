@@ -10,6 +10,7 @@ from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from securedns.blocklist import Allowlist, Blocklist  # noqa: E402
+from securedns import dns_server as dns_server_module  # noqa: E402
 from securedns.dns_server import ThreatIntelResolver, build_dns_server  # noqa: E402
 from securedns.logger_db import LoggerDB  # noqa: E402
 
@@ -128,6 +129,34 @@ def test_forwards_to_upstream_and_caches(tmp_path, monkeypatch):
     stats = logger_db.stats()
     assert stats["total_queries"] == 2
     assert stats["cached_queries"] == 1
+
+
+def test_la_duracion_no_depende_del_reloj_de_pared(tmp_path, monkeypatch):
+    resolver, logger_db = make_resolver(tmp_path, blocked_domains=[])
+    request = DNSRecord.question("example.com")
+    reply = request.reply()
+    reply.add_answer(RR("example.com", QTYPE.A, rdata=A("1.2.3.4"), ttl=60))
+
+    class RelojMonotono:
+        pasos = iter((10.0, 10.01))
+
+        @classmethod
+        def perf_counter(cls):
+            return next(cls.pasos)
+
+        @staticmethod
+        def monotonic():
+            return 1000.0
+
+    monkeypatch.setattr(dns_server_module, "time", RelojMonotono)
+    monkeypatch.setattr(
+        ThreatIntelResolver, "_forward_to_upstream",
+        lambda self, pedido: (reply.pack(), "upstream_primary_dot"),
+    )
+
+    resolver.resolve(request, FakeHandler())
+
+    assert logger_db.buscar(solo_bloqueadas=False)[0]["duration_ms"] == pytest.approx(10.0)
 
 
 def test_upstream_fallback_when_primary_unreachable(tmp_path):

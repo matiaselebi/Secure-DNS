@@ -227,6 +227,28 @@ def test_la_latencia_separa_cache_de_internet(tmp_path):
     assert lat["cache_promedio"] == pytest.approx(0.5)
 
 
+def test_la_latencia_ignora_mediciones_invalidas_y_anteriores_a_24_horas(tmp_path):
+    db = LoggerDB(str(tmp_path / "l.db"))
+    db.log_query("1.1.1.1", "actual.com", "A", False,
+                 source="upstream_primary_dot", duration_ms=100)
+    db.log_query("1.1.1.1", "reloj-ajustado.com", "A", False,
+                 source="upstream_primary_dot", duration_ms=-1200)
+    db.log_query("1.1.1.1", "vieja.com", "A", False,
+                 source="upstream_primary_dot", duration_ms=5000)
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE queries SET timestamp = ? WHERE domain = ?",
+            ("2000-01-01T00:00:00+00:00", "vieja.com"),
+        )
+
+    lat = db.latencia()
+
+    assert lat["muestras"] == 1
+    assert lat["promedio"] == pytest.approx(100.0)
+    assert lat["minimo"] == pytest.approx(100.0)
+    assert lat["maximo"] == pytest.approx(100.0)
+
+
 def test_los_bloqueos_no_entran_en_el_promedio(tmp_path):
     """Responder un bloqueo es instantáneo y no sale a ningún lado: sumarlo al
     promedio de "cuánto tarda salir a internet" lo hunde y esconde el dato."""

@@ -160,18 +160,13 @@ class ThreatIntelResolver(BaseResolver):
         # cuando el cache se llena, o sea justo cuando hay tráfico.
         self._cache: dict[tuple[str, int], tuple[bytes, float]] = {}
         self._cache_lock = threading.Lock()
-        # Conexiones TLS persistentes por IP de upstream: el handshake TLS
-        # cuesta ~1 ida y vuelta extra, así que en vez de pagarlo en cada
-        # consulta, se mantiene la conexión abierta y se reusa.
-        #
-        # Un lock POR UPSTREAM y no uno solo. Con uno solo, todas las consultas
-        # del resolver se serializaban contra una única ida y vuelta a
-        # internet: el techo quedaba en una consulta por RTT (unas 25 por
-        # segundo con 40 ms), y una sola página web dispara treinta. Peor: si
-        # el primario dejaba de responder, cada consulta esperaba su timeout de
-        # 2 segundos EN FILA, así que la número diez esperaba veinte segundos.
-        self._dot_conns: dict[str, ssl.SSLSocket] = {}
-        self._dot_locks: dict[str, threading.Lock] = {}
+        # Pool chico de conexiones TLS persistentes por upstream. Como esta
+        # implementación procesa una consulta por socket a la vez, una única
+        # conexión pone todo en fila y un timeout de 2 segundos puede volverse
+        # veinte bajo una ráfaga. Cuatro carriles mantienen bajo el costo del
+        # handshake sin abrir una conexión por consulta.
+        self._dot_conns: dict[tuple[str, int], ssl.SSLSocket] = {}
+        self._dot_locks: dict[tuple[str, int], threading.Lock] = {}
         self._dot_registro = threading.Lock()
         # create_default_context() valida el certificado del upstream contra
         # las CAs del sistema y chequea que el nombre coincida (server_hostname):
@@ -241,7 +236,7 @@ class ThreatIntelResolver(BaseResolver):
             return False
 
     def resolve(self, request: DNSRecord, handler) -> DNSRecord:
-        start = time.time()
+        start = time.perf_counter()
         # Se normaliza una sola vez y se usa la MISMA cadena para filtrar,
         # cachear y loguear. Que el punto final del FQDN o un nombre
         # internacional den una cadena distinta según dónde se lo mire es
@@ -260,7 +255,7 @@ class ThreatIntelResolver(BaseResolver):
             self.logger_db.log_query(
                 client_ip, qname, qtype_name, True,
                 reason=f"dominio en blocklist: {qname}", source="blocklist",
-                duration_ms=(time.time() - start) * 1000, noisy=ruido,
+                duration_ms=(time.perf_counter() - start) * 1000, noisy=ruido,
                 category=categoria,
             )
             return reply
@@ -280,13 +275,13 @@ class ThreatIntelResolver(BaseResolver):
                 reply.header.id = request.header.id
                 self.logger_db.log_query(
                     client_ip, qname, qtype_name, False, source="cache",
-                    reason=motivo, duration_ms=(time.time() - start) * 1000,
+                    reason=motivo, duration_ms=(time.perf_counter() - start) * 1000,
                     noisy=ruido, **self._datos_de(reply),
                 )
                 return reply
 
         response_bytes, source = self._forward_to_upstream(request)
-        duration_ms = (time.time() - start) * 1000
+        duration_ms = (time.perf_counter() - start) * 1000
 
         reply = self._parsear(response_bytes) if response_bytes else None
         if reply is None:
@@ -402,6 +397,10 @@ class ThreatIntelResolver(BaseResolver):
     # sobra la navegación real de una casa.
     MAX_CACHE = 20_000
 
+    # Cuatro conexiones por upstream alcanzan para las ráfagas normales de una
+    # casa y evitan el extremo opuesto: un socket nuevo por cada consulta.
+    DOT_POOL_SIZE = 4
+
     # Techo del tamaño de una respuesta guardada. Por TLS se pueden recibir
     # hasta 64 KB por respuesta, así que 20.000 entradas de ese tamaño serían
     # más de un giga de RAM. Una respuesta normal no pasa de unos cientos de
@@ -411,7 +410,7 @@ class ThreatIntelResolver(BaseResolver):
     def _leer_cache(self, cache_key) -> bytes | None:
         with self._cache_lock:
             guardado = self._cache.get(cache_key)
-            if guardado is None or time.time() >= guardado[1]:
+            if guardado is None or time.monotonic() >= guardado[1]:
                 return None
             return guardado[0]
 
@@ -420,7 +419,7 @@ class ThreatIntelResolver(BaseResolver):
             return
         with self._cache_lock:
             if len(self._cache) >= self.MAX_CACHE:
-                ahora = time.time()
+                ahora = time.monotonic()
                 # Primero lo vencido, que no le sirve a nadie.
                 vencidas = [k for k, (_, vence) in self._cache.items() if vence <= ahora]
                 for clave in vencidas:
@@ -432,7 +431,7 @@ class ThreatIntelResolver(BaseResolver):
                 if len(self._cache) >= self.MAX_CACHE:
                     for clave in list(self._cache)[: max(1, self.MAX_CACHE // 10)]:
                         self._cache.pop(clave, None)
-            self._cache[cache_key] = (response_bytes, time.time() + ttl)
+            self._cache[cache_key] = (response_bytes, time.monotonic() + ttl)
 
     def clear_cache(self) -> None:
         """Vacía el cache de respuestas en memoria. Pensado para el botón
@@ -511,9 +510,9 @@ class ThreatIntelResolver(BaseResolver):
                 # Se lee en un bucle: si llega basura de un tercero que igual
                 # pasó el filtro del kernel, se descarta y se sigue esperando
                 # la buena hasta que venza el timeout.
-                fin = time.time() + self.upstream_timeout
-                while time.time() < fin:
-                    sock.settimeout(max(0.05, fin - time.time()))
+                fin = time.monotonic() + self.upstream_timeout
+                while time.monotonic() < fin:
+                    sock.settimeout(max(0.05, fin - time.monotonic()))
                     data = sock.recv(4096)
                     if self._respuesta_valida(data, request):
                         return data, label
@@ -556,37 +555,37 @@ class ThreatIntelResolver(BaseResolver):
         return None, "error"
 
     def _dot_query(self, upstream_ip: str, tls_name: str, payload: bytes) -> bytes:
-        """Manda una consulta por la conexión TLS persistente hacia ese
-        upstream (abriéndola si no existe). Si la conexión guardada murió
-        (el upstream cierra conexiones inactivas después de un rato), se
-        descarta y se reintenta UNA vez con una conexión nueva."""
-        with self._lock_de(upstream_ip):
+        """Manda una consulta por un carril persistente del pool TLS.
+
+        El ID de la consulta distribuye el tráfico de forma estable y sin otro
+        contador compartido. Cada carril sigue serializado porque TCP es un
+        stream, pero los demás pueden avanzar en paralelo.
+        """
+        clave = (upstream_ip, self._dot_slot(payload))
+        with self._lock_de(clave):
             for attempt in (1, 2):
-                sock = self._dot_conns.get(upstream_ip)
+                sock = self._dot_conns.get(clave)
                 if sock is None:
                     sock = self._dot_connect(upstream_ip, tls_name)
-                    self._dot_conns[upstream_ip] = sock
+                    self._dot_conns[clave] = sock
                 try:
                     sock.sendall(encode_tcp_query(payload))
                     return read_tcp_response(sock)
                 except (OSError, ssl.SSLError, ConnectionError):
-                    self._dot_close(upstream_ip)
+                    self._dot_close(clave)
                     if attempt == 2:
                         raise
             raise ConnectionError("inalcanzable")  # nunca llega; para el type checker
 
-    def _lock_de(self, upstream_ip: str) -> threading.Lock:
-        """El lock de ESE upstream, creándolo si es la primera vez.
+    def _dot_slot(self, payload: bytes) -> int:
+        return int.from_bytes(payload[:2].ljust(2, b"\0"), "big") % self.DOT_POOL_SIZE
 
-        Uno por upstream y no uno global: ver el comentario de `_dot_locks`.
-        El `_dot_registro` protege solo la creación, que dura nanosegundos, y
-        no la consulta, que dura una ida y vuelta a internet.
-        """
+    def _lock_de(self, clave: tuple[str, int]) -> threading.Lock:
         with self._dot_registro:
-            lock = self._dot_locks.get(upstream_ip)
+            lock = self._dot_locks.get(clave)
             if lock is None:
                 lock = threading.Lock()
-                self._dot_locks[upstream_ip] = lock
+                self._dot_locks[clave] = lock
             return lock
 
     def _dot_connect(self, upstream_ip: str, tls_name: str) -> ssl.SSLSocket:
@@ -596,8 +595,8 @@ class ThreatIntelResolver(BaseResolver):
         # realmente de dns.quad9.net, el handshake falla acá mismo).
         return self._tls_context.wrap_socket(raw_sock, server_hostname=tls_name)
 
-    def _dot_close(self, upstream_ip: str) -> None:
-        sock = self._dot_conns.pop(upstream_ip, None)
+    def _dot_close(self, clave: tuple[str, int]) -> None:
+        sock = self._dot_conns.pop(clave, None)
         if sock is not None:
             try:
                 sock.close()
@@ -614,10 +613,10 @@ class ThreatIntelResolver(BaseResolver):
         mientras una consulta podía estar escribiendo en ese mismo socket.
         """
         with self._dot_registro:
-            upstreams = list(self._dot_conns)
-        for ip in upstreams:
-            with self._lock_de(ip):
-                self._dot_close(ip)
+            conexiones = list(self._dot_conns)
+        for clave in conexiones:
+            with self._lock_de(clave):
+                self._dot_close(clave)
 
 
 class ServidorDNS:

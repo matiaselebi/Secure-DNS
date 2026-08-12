@@ -346,6 +346,58 @@ def _resuelve_algo(nombre: str = "one.one.one.one") -> bool:
         return False
 
 
+def _modo_dice_que_toquemos_el_dns() -> bool:
+    """¿El config dice que el DNS del sistema lo maneja SecureDNS?
+
+    Se lee el config acá adentro, aunque el resto del módulo no lo necesite,
+    porque estas dos funciones las llama SecureCenter por su cuenta (mandando
+    un `import` a un subproceso) y no tiene forma de pasarnos el config ya
+    cargado. Si el chequeo viviera del lado de SecureCenter, el conocimiento
+    del DNS del sistema volvería a estar en dos lugares, que es exactamente lo
+    que causó el apagón del reinicio.
+    """
+    try:
+        from .config_loader import load_config
+        from .modo import toca_el_dns_del_sistema
+
+        return toca_el_dns_del_sistema(load_config())
+    except Exception as exc:  # noqa: BLE001
+        # Si no se puede saber, se asume que sí: es el comportamiento de
+        # siempre. Equivocarse para este lado es recuperable; para el otro,
+        # deja la máquina sin resolver nombres.
+        print(f"[SecureDNS] no pude leer el modo ({exc}); asumo resolutor propio")
+        return True
+
+
+def tomar_el_dns_si_corresponde(respaldo: str = RESPALDO_POR_DEFECTO) -> dict:
+    """Pone 127.0.0.1 en el adaptador, pero SOLO si acá resuelve SecureDNS.
+
+    Es la puerta que usa SecureCenter al encender el núcleo. Sin esta
+    comprobación, encender la suite con SecureDNS en modo Pi-hole apuntaría la
+    máquina a un 127.0.0.1 donde no escucha nadie: internet cortado y ni un
+    mensaje de error. Es el mismo apagón que ya pasó una vez por otro motivo,
+    y por eso la decisión vive en un solo lugar.
+    """
+    if not _modo_dice_que_toquemos_el_dns():
+        aviso = ("resuelve Pi-hole: el DNS del sistema no se toca "
+                 "(tiene que apuntar a Pi-hole, no a 127.0.0.1)")
+        print(f"[SecureDNS] {aviso}")
+        return {"aplicados": [], "error": "", "salteado": True, "motivo": aviso}
+    return poner_nuestro_dns(respaldo)
+
+
+def devolver_el_dns_si_corresponde(prefijo: str = "[SecureDNS]") -> dict:
+    """La otra mitad: no se restaura lo que nunca se tocó.
+
+    Hoy restaurar igual no rompería nada, pero pondría a SecureDNS a manotear
+    los adaptadores de una máquina donde el DNS lo administra otro, que es
+    justo lo que la jubilación del resolutor viene a terminar.
+    """
+    if not _modo_dice_que_toquemos_el_dns():
+        return {"restaurados": [], "error": "", "salteado": True}
+    return restaurar_e_informar(prefijo)
+
+
 def restaurar_e_informar(prefijo: str = "[SecureDNS]") -> dict:
     """Restaura e imprime qué pasó, con el comando manual si falló."""
     resultado = restaurar_dns_automatico()

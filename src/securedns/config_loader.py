@@ -22,6 +22,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 @dataclass
 class DnsConfig:
+    # Quién resuelve: "propio", "pihole" o "auto".
+    #
+    # "auto" (el de fábrica) usa Pi-hole si está habilitado y el resolutor
+    # propio si no. Ver modo.py: la respuesta se calcula en un solo lugar
+    # porque cambia el comportamiento de cinco, y olvidarse de uno deja al
+    # sistema apuntando a un resolutor que no escucha.
+    modo: str = "auto"
     host: str = "127.0.0.1"
     port: int = 53
     upstream_timeout: float = 2.0
@@ -113,6 +120,53 @@ class DnsDelSistemaConfig:
 
 
 @dataclass
+class PiholeConfig:
+    """Publicarle a Pi-hole las listas que junta Secure-Intel.
+
+    Apagado por defecto, y no es prudencia de más: quien clonó SecureDNS para
+    usarlo como resolutor no tiene Pi-hole, y no puede aparecerle un error de
+    conexión en cada arranque por una función que nunca pidió.
+
+    `address` vacío significa `file://<carpeta_listas>/<nombre_lista>`, que es
+    lo correcto cuando SecureDNS y Pi-hole viven en la misma máquina. Si
+    corren en máquinas distintas `file://` no sirve (Pi-hole buscaría ese
+    archivo en SU disco), y hay que servir la lista por HTTP y poner esa URL
+    acá. Es el único cambio que pide el caso remoto.
+
+    La contraseña NO está acá. Sale del .env, igual que el token de Telegram.
+    """
+
+    habilitado: bool = False
+    url: str = "http://127.0.0.1"
+    # Solo importa si `url` es https con certificado propio. Apagarlo es
+    # aceptar que alguien en el medio lea la contraseña, así que únicamente
+    # tiene sentido contra 127.0.0.1.
+    verificar_tls: bool = True
+    carpeta_listas: str = "/etc/pihole/securesuite"
+    nombre_lista: str = "secureintel_dominios.txt"
+    address: str = ""
+    comentario: str = "SecureSuite / Secure-Intel (no editar a mano)"
+    # Si después de publicar se le pide a Pi-hole que reconstruya. En false la
+    # lista queda escrita y registrada pero no aplica hasta el próximo
+    # gravity, que es lo que se quiere si ya tenés un cron propio.
+    correr_gravity: bool = True
+    # Cada cuántas horas publica solo el proceso que queda prendido.
+    horas_entre_publicaciones: float = 6
+
+    # ---- fase 3: traer las consultas de Pi-hole para analizarlas acá ----
+    # La base de consultas de Pi-hole. SE LEE EN SOLO LECTURA, siempre.
+    # Tiene que estar en ESTA máquina: SQLite no se lee por red.
+    base_consultas: str = "/etc/pihole/pihole-FTL.db"
+    # Dónde se anota hasta qué fila se leyó. Es estado nuestro, no de Pi-hole.
+    marca_de_agua: str = "data/pihole_marca.json"
+    # Importar al arrancar y cada tantos minutos mientras el proceso viva.
+    # Cada 5 minutos es suficiente: la detección de túneles mira ventanas de
+    # horas, no de segundos.
+    importar_consultas: bool = True
+    minutos_entre_importaciones: float = 5
+
+
+@dataclass
 class Config:
     dns: DnsConfig = field(default_factory=DnsConfig)
     filtering: FilteringConfig = field(default_factory=FilteringConfig)
@@ -120,9 +174,11 @@ class Config:
     dns_del_sistema: DnsDelSistemaConfig = field(default_factory=DnsDelSistemaConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     intel: IntelConfig = field(default_factory=IntelConfig)
+    pihole: PiholeConfig = field(default_factory=PiholeConfig)
     # Salen del entorno o del .env, nunca del YAML.
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    pihole_password: str = ""
 
     def resolve_path(self, relative_path: str) -> Path:
         path = Path(relative_path)
@@ -171,10 +227,12 @@ def load_config(config_path: str | None = None) -> Config:
     return Config(
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+        pihole_password=os.getenv("PIHOLE_PASSWORD", ""),
         dns=_seccion(DnsConfig, raw, "dns"),
         filtering=_seccion(FilteringConfig, raw, "filtering"),
         logging=_seccion(LoggingConfig, raw, "logging"),
         dashboard=_seccion(DashboardConfig, raw, "dashboard"),
         intel=_seccion(IntelConfig, raw, "intel"),
         dns_del_sistema=_seccion(DnsDelSistemaConfig, raw, "dns_del_sistema"),
+        pihole=_seccion(PiholeConfig, raw, "pihole"),
     )

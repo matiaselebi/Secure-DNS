@@ -86,12 +86,23 @@ class LoggerDB:
             # Lo que se puede leer de la respuesta sin salir a ningún lado:
             # si el upstream la validó con DNSSEC, a qué IP resolvió, y de qué
             # país/ASN/proveedor es esa IP según la base local.
+            # `origen` dice quién generó la fila: el resolutor propio
+            # ('propio') o una importación de Pi-hole ('pihole').
+            #
+            # Existe por un problema concreto de doble conteo. SecureCenter lee
+            # ESTA base y también lee la de Pi-hole directamente. Sin una marca
+            # que las distinga, cada bloqueo importado le llegaría dos veces, y
+            # su correlacionador creería ver dos herramientas distintas cuando
+            # en realidad vio una sola. Va en columna propia y no en `source`
+            # porque `source` ya significa otra cosa (cache, error, upstream) y
+            # las estadísticas de caché se apoyan en eso.
             for nueva, tipo in (
                 ("dnssec", "INTEGER DEFAULT 0"),
                 ("dest_ip", "TEXT DEFAULT ''"),
                 ("country", "TEXT DEFAULT ''"),
                 ("asn", "TEXT DEFAULT ''"),
                 ("provider", "TEXT DEFAULT ''"),
+                ("origen", "TEXT DEFAULT 'propio'"),
             ):
                 if nueva not in columnas:
                     conn.execute(f"ALTER TABLE queries ADD COLUMN {nueva} {tipo}")
@@ -186,6 +197,50 @@ class LoggerDB:
             # el recorte se atrasaba de forma impredecible.
             self._inserts_since_prune += 1
         self._maybe_prune()
+
+    def importar_consultas(self, filas: list) -> int:
+        """Mete de una tanda consultas que vinieron de afuera (Pi-hole).
+
+        Es un método aparte de `log_query` y no un parámetro más, por tres
+        motivos que juntos hacen que compartirlo salga mal:
+
+        1. **La hora no es ahora.** `log_query` estampa `datetime.now()`, que
+           es lo correcto para una consulta que se está atendiendo y lo
+           incorrecto para una que pasó hace seis horas en otro equipo. Acá la
+           hora viene en la fila.
+        2. **Son miles.** Una tanda de veinte mil filas con un commit por fila
+           tarda minutos; con `executemany` adentro de una sola transacción,
+           menos de un segundo.
+        3. **Quedan marcadas.** `origen = 'pihole'` es lo que evita que
+           SecureCenter cuente cada bloqueo dos veces.
+
+        Devuelve cuántas filas entraron.
+        """
+        if not filas:
+            return 0
+        valores = [
+            (f["timestamp"], f.get("client_ip", ""), f["domain"], f.get("qtype", ""),
+             int(f.get("blocked", 0)), f.get("reason", ""), f.get("source", "pihole"),
+             float(f.get("duration_ms", 0.0)), int(f.get("noisy", 0)),
+             f.get("category", ""), f.get("parent", ""), "pihole")
+            for f in filas
+        ]
+        with self._lock, closing(self._connect()) as conn, conn:
+            conn.executemany(
+                """
+                INSERT INTO queries
+                    (timestamp, client_ip, domain, qtype, blocked, reason,
+                     source, duration_ms, noisy, category, parent, origen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                valores,
+            )
+            conn.commit()
+            self._inserts_since_prune += len(valores)
+        # El recorte se evalúa una vez por tanda y no una por fila: importar
+        # veinte mil consultas no puede disparar veinte mil comprobaciones.
+        self._maybe_prune()
+        return len(valores)
 
     def recalcular_padres(self) -> int:
         """Completa la columna `parent` de las filas que no la tengan.
@@ -548,8 +603,8 @@ class LoggerDB:
             )
             return cur.fetchall()
 
-    def latencia(self, ocultar: bool = False) -> dict:
-        """Cuánto tarda en resolver, separando caché de consulta real.
+    def latencia(self, ocultar: bool = False, horas: int = 24) -> dict:
+        """Cuánto tardó en resolver recientemente, separando caché e internet.
 
         La separación no es un detalle: una respuesta desde caché tarda menos
         de un milisegundo y una que sale a internet tarda decenas. Promediarlas
@@ -563,16 +618,21 @@ class LoggerDB:
         """
         filtro, params = self._filtro_ocultos(ocultar)
         y_ademas = f" AND {filtro}" if filtro else ""
+        desde = (datetime.now(timezone.utc) - timedelta(hours=horas)).isoformat()
+        parametros = (desde, *params)
         with self._lock, closing(self._connect()) as conn, conn:
             fila = conn.execute(
                 "SELECT COUNT(*), AVG(duration_ms), MIN(duration_ms), MAX(duration_ms) "
                 "FROM queries WHERE blocked = 0 AND source != 'cache' "
-                f"AND source != 'error'{y_ademas}",
-                params,
+                f"AND source != 'error' AND timestamp >= ? "
+                f"AND duration_ms >= 0{y_ademas}",
+                parametros,
             ).fetchone()
             desde_cache = conn.execute(
-                f"SELECT COUNT(*), AVG(duration_ms) FROM queries WHERE source = 'cache'{y_ademas}",
-                params,
+                "SELECT COUNT(*), AVG(duration_ms) FROM queries "
+                f"WHERE source = 'cache' AND timestamp >= ? "
+                f"AND duration_ms >= 0{y_ademas}",
+                parametros,
             ).fetchone()
         muestras = fila[0] or 0
         return {
