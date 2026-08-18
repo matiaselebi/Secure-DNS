@@ -1,14 +1,37 @@
+# Python
 __pycache__/
-*.pyc
-.env
+*.py[cod]
 venv/
 .venv/
+*.egg-info/
+build/
+dist/
+
+# Tests y herramientas
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+graphify-out/
+
+# Secretos
+.env
+.env.*
+!.env.example
+
+# Estado local
 data/*.db
-data/dns.pid
+data/*.db-*
+data/*.pid
+data/dns_previo.json
 data/blocklist_feeds.txt
 data/blocklist_adtracker.txt
 data/geoip.db
-.pytest_cache/
-*.egg-info/
+*.log
+
+# Editor y Windows
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
